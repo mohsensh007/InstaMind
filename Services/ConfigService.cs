@@ -178,6 +178,9 @@ public sealed class ConfigService
                 provider.LastTestOk = existing.LastTestOk;
                 provider.LastTestAt = existing.LastTestAt;
                 provider.LastTestMessage = existing.LastTestMessage;
+                // Measured usage is server-owned; a client edit must not reset it.
+                provider.UsedTokens = existing.UsedTokens;
+                provider.ReplyCount = existing.ReplyCount;
                 cfg.AiProviders[cfg.AiProviders.IndexOf(existing)] = provider;
             }
 
@@ -187,6 +190,97 @@ public sealed class ConfigService
             _config = cfg;
             return provider;
         }
+    }
+
+    /// <summary>Tehran calendar day (UTC+3:30, no DST) used for the daily budgets.</summary>
+    public static string TodayTehran =>
+        DateTimeOffset.UtcNow.ToOffset(TimeSpan.FromMinutes(210)).ToString("yyyy-MM-dd");
+
+    private static void RollDay(ConnectedPage page)
+    {
+        var today = TodayTehran;
+        if (page.UsageDate == today) return;
+        page.UsageDate = today;
+        page.RepliesToday = 0;
+        page.TokensToday = 0;
+    }
+
+    /// <summary>True when the page already spent its daily budget; tells which one.</summary>
+    public bool PageLimitReached(string? pageRef, out string? which)
+    {
+        which = null;
+        if (string.IsNullOrWhiteSpace(pageRef)) return false;
+
+        lock (_sync)
+        {
+            var page = _config.Pages.FirstOrDefault(x => x.IgUserId == pageRef || x.Id == pageRef);
+            if (page is null) return false;
+
+            RollDay(page);
+            if (page.DailyReplyLimit > 0 && page.RepliesToday >= page.DailyReplyLimit)
+            {
+                which = "reply";
+                Persist(_config);
+                return true;
+            }
+            if (page.DailyTokenLimit > 0 && page.TokensToday >= page.DailyTokenLimit)
+            {
+                which = "token";
+                Persist(_config);
+                return true;
+            }
+
+            Persist(_config);
+            return false;
+        }
+    }
+
+    /// <summary>Accumulates measured token usage on the provider and on the page (day counters).</summary>
+    public void RecordUsage(string? pageRef, string? providerId, int tokens, bool countedAsReply)
+    {
+        lock (_sync)
+        {
+            if (tokens < 0) tokens = 0;
+
+            if (!string.IsNullOrWhiteSpace(providerId))
+            {
+                var provider = _config.AiProviders.FirstOrDefault(p => p.Id == providerId);
+                if (provider is not null)
+                {
+                    provider.UsedTokens += tokens;
+                    if (countedAsReply) provider.ReplyCount++;
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(pageRef))
+            {
+                var page = _config.Pages.FirstOrDefault(x => x.IgUserId == pageRef || x.Id == pageRef);
+                if (page is not null)
+                {
+                    RollDay(page);
+                    page.TokensToday += tokens;
+                    if (countedAsReply) page.RepliesToday++;
+                }
+            }
+
+            Persist(_config);
+        }
+    }
+
+    /// <summary>Updates (and optionally resets) the daily budget of one page.</summary>
+    public ConnectedPage? SetPageLimits(string id, int? replyLimit, long? tokenLimit, bool resetUsage)
+    {
+        return UpdatePage(id, p =>
+        {
+            if (replyLimit.HasValue) p.DailyReplyLimit = Math.Clamp(replyLimit.Value, 0, 100000);
+            if (tokenLimit.HasValue) p.DailyTokenLimit = Math.Clamp(tokenLimit.Value, 0, 100_000_000_000L);
+            if (resetUsage)
+            {
+                p.UsageDate = TodayTehran;
+                p.RepliesToday = 0;
+                p.TokensToday = 0;
+            }
+        });
     }
 
     public AiProvider? UpdateProvider(string id, Action<AiProvider> mutate)
@@ -366,6 +460,11 @@ public sealed class ConfigService
             page.Username = (page.Username ?? "").Trim().TrimStart('@');
             page.AiId = (page.AiId ?? "").Trim();
             page.LastTestMessage = page.LastTestMessage ?? "";
+            page.DailyReplyLimit = Math.Clamp(page.DailyReplyLimit, 0, 100000);
+            page.DailyTokenLimit = Math.Clamp(page.DailyTokenLimit, 0, 100_000_000_000L);
+            page.RepliesToday = Math.Max(0, page.RepliesToday);
+            page.TokensToday = Math.Max(0, page.TokensToday);
+            page.UsageDate = page.UsageDate ?? "";
         }
         foreach (var provider in cfg.AiProviders)
         {
@@ -378,6 +477,9 @@ public sealed class ConfigService
             provider.MaxTokens = Math.Clamp(provider.MaxTokens, 50, 4000);
             provider.TimeoutSeconds = Math.Clamp(provider.TimeoutSeconds, 5, 120);
             provider.LastTestMessage = provider.LastTestMessage ?? "";
+            provider.TokenBalance = Math.Clamp(provider.TokenBalance, 0, 100_000_000_000L);
+            provider.UsedTokens = Math.Max(0, provider.UsedTokens);
+            provider.ReplyCount = Math.Max(0, provider.ReplyCount);
         }
 
         cfg.Instagram.Mode = cfg.Instagram.Mode is "live" ? "live" : "sandbox";

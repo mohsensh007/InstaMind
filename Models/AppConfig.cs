@@ -150,6 +150,20 @@ public sealed class ConnectedPage
     public DateTimeOffset? LastTestAt { get; set; }
     public string LastTestMessage { get; set; } = "";
 
+    // ---- daily budget for the AI connected to this page (0 = no limit) ----
+
+    /// <summary>Max automatic AI replies per day for this page.</summary>
+    public int DailyReplyLimit { get; set; }
+
+    /// <summary>Max tokens the AI may burn per day for this page.</summary>
+    public long DailyTokenLimit { get; set; }
+
+    /// <summary>Day the counters below belong to (yyyy-MM-dd, Tehran time).</summary>
+    public string UsageDate { get; set; } = "";
+
+    public int RepliesToday { get; set; }
+    public long TokensToday { get; set; }
+
     public ConnectedPage Clone() => System.Text.Json.JsonSerializer.Deserialize<ConnectedPage>(
         System.Text.Json.JsonSerializer.Serialize(this, JsonConfig.Options), JsonConfig.Options)!;
 }
@@ -173,6 +187,17 @@ public sealed class AiProvider
     public string ScopeCheckModel { get; set; } = "";
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    // ---- budget & measured usage ----
+
+    /// <summary>Remaining token balance the owner reports from the provider dashboard (0 = unknown).</summary>
+    public long TokenBalance { get; set; }
+
+    /// <summary>Tokens this provider has actually consumed through the app (prompt + completion).</summary>
+    public long UsedTokens { get; set; }
+
+    /// <summary>Number of replies this provider produced (basis of the per-reply average).</summary>
+    public long ReplyCount { get; set; }
 
     // Last connection test (filled by POST /api/ais/{id}/test).
     public bool? LastTestOk { get; set; }

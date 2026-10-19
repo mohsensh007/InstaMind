@@ -209,6 +209,87 @@ app.MapDelete("/api/ais/{id}", (string id, ConfigService config) =>
 });
 
 // ---------------------------------------------------------------------------
+// Token usage: estimate how many replies each AI can still give,
+// and the daily budget each page is allowed to spend.
+// ---------------------------------------------------------------------------
+
+const int DefaultAvgTokensPerReply = 600; // assumed until real calls measure it
+
+app.MapGet("/api/usage", (ConfigService config) =>
+{
+    var cfg = config.Current;
+    var day = ConfigService.TodayTehran;
+
+    var providers = cfg.AiProviders.Select(p =>
+    {
+        var measured = p.ReplyCount > 0 ? (long)Math.Round((double)p.UsedTokens / p.ReplyCount) : 0L;
+        var avg = measured > 0 ? measured : DefaultAvgTokensPerReply;
+        return new
+        {
+            p.Id,
+            p.Name,
+            p.Model,
+            p.TokenBalance,
+            p.UsedTokens,
+            p.ReplyCount,
+            avgTokensPerReply = avg,
+            measured = p.ReplyCount > 0,
+            estimatedMessagesLeft = p.TokenBalance > 0 ? p.TokenBalance / avg : (long?)null,
+            lastTestOk = p.LastTestOk
+        };
+    }).ToList();
+
+    var pages = cfg.Pages.Select(p => new
+    {
+        p.Id,
+        p.Username,
+        p.IgUserId,
+        p.AiId,
+        p.DailyReplyLimit,
+        p.DailyTokenLimit,
+        repliesToday = p.UsageDate == day ? p.RepliesToday : 0,
+        tokensToday = p.UsageDate == day ? p.TokensToday : 0
+    }).ToList();
+
+    return Results.Ok(new
+    {
+        day,
+        defaultAvgTokensPerReply = DefaultAvgTokensPerReply,
+        providers,
+        pages
+    });
+});
+
+app.MapPost("/api/pages/{id}/limit", async (string id, HttpRequest request, ConfigService config, CancellationToken ct) =>
+{
+    var body = await ReadJsonAsync<PageLimitRequest>(request);
+    if (body is null) return Results.BadRequest(new { error = "بدنهٔ درخواست خالی است." });
+
+    var page = config.SetPageLimits(
+        id,
+        body.DailyReplyLimit,
+        body.DailyTokenLimit,
+        body.ResetUsage == true);
+
+    return page is null
+        ? Results.NotFound(new { error = "صفحه پیدا نشد." })
+        : Results.Ok(new
+        {
+            ok = true,
+            page = new
+            {
+                page.Id,
+                page.DailyReplyLimit,
+                page.DailyTokenLimit,
+                page.RepliesToday,
+                page.TokensToday,
+                day = ConfigService.TodayTehran
+            },
+            config = config.GetMasked()
+        });
+});
+
+// ---------------------------------------------------------------------------
 // Official Instagram Business Login (OAuth). The password never reaches us.
 // ---------------------------------------------------------------------------
 
@@ -541,3 +622,4 @@ public sealed record PauseRequest(bool Paused);
 public sealed record TestPageRequest(string? PageId);
 public sealed record TestAiRequest(string? AiId);
 public sealed record AssignAiRequest(string? AiId);
+public sealed record PageLimitRequest(int? DailyReplyLimit, long? DailyTokenLimit, bool? ResetUsage);

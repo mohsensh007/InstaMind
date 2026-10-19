@@ -96,6 +96,18 @@ public sealed class ReplyEngine
             }
         }
 
+        // Daily budget of this page (only real auto-replies consume it; lab tests never do).
+        if (deliver && _config.PageLimitReached(page?.IgUserId ?? incoming.PageId, out var limitKind))
+        {
+            result.Blocked = true;
+            result.Reason = limitKind == "token" ? "page_token_limit" : "page_reply_limit";
+            Trace("سقف مصرف روزانهٔ صفحه", "رد",
+                limitKind == "token"
+                    ? "سقف توکن امروز این صفحه پر شده؛ فردا ریست می‌شود یا سقف را بالا ببر"
+                    : "سقف پاسخ امروز این صفحه پر شده؛ فردا ریست می‌شود یا سقف را بالا ببر");
+            return Finish();
+        }
+
         var hourly = await _conversations.AiRepliesInLastHourAsync(incoming.SenderId);
         if (hourly >= cfg.Guardrails.MaxRepliesPerHour)
         {
@@ -127,7 +139,11 @@ public sealed class ReplyEngine
         // Gate 2: model-based topic classification (independent of the reply model call).
         if (reply is null && cfg.Guardrails.StrictMode && aiConfig.ScopeCheckEnabled)
         {
-            var (onTopic, reason) = await CheckScopeAsync(cfg, aiConfig, text, ct);
+            var (onTopic, reason, scopeTokens) = await CheckScopeAsync(cfg, aiConfig, text, ct);
+            if (scopeTokens > 0)
+            {
+                _config.RecordUsage(page?.IgUserId ?? incoming.PageId, provider?.Id, scopeTokens, countedAsReply: false);
+            }
             if (onTopic == false)
             {
                 reply = cfg.Persona.OffTopicReply;
@@ -175,6 +191,11 @@ public sealed class ReplyEngine
             }
 
             var ai = await _ai.ChatAsync(aiConfig, messages, ct: ct);
+            _config.RecordUsage(
+                page?.IgUserId ?? incoming.PageId,
+                provider?.Id,
+                ai.PromptTokens + ai.CompletionTokens,
+                countedAsReply: ai.Ok);
             if (!ai.Ok)
             {
                 status = "failed";
@@ -265,7 +286,7 @@ public sealed class ReplyEngine
         return send;
     }
 
-    private async Task<(bool? OnTopic, string? Reason)> CheckScopeAsync(AppConfig cfg, AiConfig aiConfig, string text, CancellationToken ct)
+    private async Task<(bool? OnTopic, string? Reason, int Tokens)> CheckScopeAsync(AppConfig cfg, AiConfig aiConfig, string text, CancellationToken ct)
     {
         var scopeConfig = new AiConfig
         {
@@ -285,26 +306,27 @@ public sealed class ReplyEngine
         };
 
         var result = await _ai.ChatAsync(scopeConfig, messages, temperature: 0, maxTokens: 150, jsonMode: true, ct: ct);
+        var tokens = result.PromptTokens + result.CompletionTokens;
         if (!result.Ok)
         {
             _log.LogWarning("Scope check failed: {Error}", result.Error);
-            return (null, result.Error);
+            return (null, result.Error, tokens);
         }
 
         var json = ExtractJson(result.Text);
-        if (json is null) return (null, "پاسخ دروازهٔ موضوع قابل خواندن نبود");
+        if (json is null) return (null, "پاسخ دروازهٔ موضوع قابل خواندن نبود", tokens);
 
         try
         {
             using var doc = JsonDocument.Parse(json);
             var verdict = ReadBool(doc.RootElement, "on_topic", "allowed", "ok", "onTopic");
-            if (verdict is null) return (null, "فیلد on_topic پیدا نشد");
+            if (verdict is null) return (null, "فیلد on_topic پیدا نشد", tokens);
             var reason = ReadString(doc.RootElement, "reason", "topic");
-            return (verdict, reason);
+            return (verdict, reason, tokens);
         }
         catch (JsonException)
         {
-            return (null, "JSON دروازهٔ موضوع نامعتبر بود");
+            return (null, "JSON دروازهٔ موضوع نامعتبر بود", tokens);
         }
     }
 

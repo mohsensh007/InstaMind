@@ -105,6 +105,8 @@ function initials(text) {
   return clean.slice(0, 2).toUpperCase();
 }
 
+const nfmt = (value) => new Intl.NumberFormat('fa-IR').format(Number(value || 0));
+
 /* ---------------------------------- fields -------------------------------- */
 
 function field(label, path, options = {}) {
@@ -438,6 +440,7 @@ async function renderConnection() {
   const ig = state.config.instagram;
   const pages = state.config.pages || [];
   const ais = state.config.aiProviders || [];
+  const usage = await api('/api/usage');
   const webhook = state.meta?.webhookUrl || `${location.origin}/webhook/instagram`;
   const redirectUri = state.meta?.oauthRedirectUri || `${location.origin}/oauth/instagram/callback`;
   const ready = Boolean(state.meta?.oauthReady);
@@ -463,6 +466,18 @@ async function renderConnection() {
       ${ais.map((a) => `<option value="${esc(a.id)}" ${page.aiId === a.id ? 'selected' : ''}>${esc(a.name)} — ${esc(a.model)}</option>`).join('')}
     </select>`;
 
+  const usageLineText = (page, pu) => {
+    const parts = [`امروز: ${nfmt(pu.repliesToday || 0)} پاسخ · ${nfmt(pu.tokensToday || 0)} توکن`];
+    if (page.dailyReplyLimit > 0) {
+      parts.push(`سقف پاسخ: ${nfmt(page.dailyReplyLimit)} (باقی‌مانده ${nfmt(Math.max(0, page.dailyReplyLimit - (pu.repliesToday || 0)))})`);
+    }
+    if (page.dailyTokenLimit > 0) {
+      parts.push(`سقف توکن: ${nfmt(page.dailyTokenLimit)} (باقی‌مانده ${nfmt(Math.max(0, page.dailyTokenLimit - (pu.tokensToday || 0)))})`);
+    }
+    if (!(page.dailyReplyLimit > 0) && !(page.dailyTokenLimit > 0)) parts.push('بدون سقف مصرف');
+    return parts.join(' · ');
+  };
+
   const pageRow = (page) => {
     const expiry = page.tokenExpiresAt ? new Date(page.tokenExpiresAt) : null;
     const expiryText = expiry ? new Intl.DateTimeFormat('fa-IR', { dateStyle: 'medium' }).format(expiry) : 'نامشخص';
@@ -486,6 +501,15 @@ async function renderConnection() {
             <small dir="ltr" style="direction:ltr">IG User ID: ${esc(page.igUserId)}</small>
             <small>اتصال: ${esc(timeAgo(page.connectedAt))} · انقضای توکن: ${esc(expiryText)}${daysLeft != null ? ` (${daysLeft} روز مانده)` : ''}</small>
             <small>پاسخ‌دهنده: <b class="assigned-name">${esc(assigned)}</b>${page.subscribed ? ' · وبهوک فعال ✓' : ''}</small>
+            <small class="page-usage-line">${esc(usageLineText(page, (usage.pages || []).find((x) => x.id === page.id) || {}))}</small>
+            <div class="limit-inputs">
+              <label class="limit-field"><span>سقف پاسخ روزانه</span>
+                <input class="input limit-reply" type="number" min="0" data-page="${esc(page.id)}" value="${page.dailyReplyLimit || ''}" placeholder="بدون سقف" />
+              </label>
+              <label class="limit-field"><span>سقف توکن روزانه</span>
+                <input class="input limit-token" type="number" min="0" data-page="${esc(page.id)}" value="${page.dailyTokenLimit || ''}" placeholder="بدون سقف" />
+              </label>
+            </div>
             ${page.lastTestMessage ? `<small class="muted">آخرین تست: ${esc(page.lastTestMessage)}</small>` : ''}
           </div>
         </div>
@@ -585,6 +609,33 @@ async function renderConnection() {
     button.addEventListener('click', () => {
       $('#mode-value').value = button.dataset.mode;
       $$('#mode-seg .seg').forEach((b) => b.classList.toggle('active', b === button));
+    });
+  });
+
+  $$('.limit-reply, .limit-token').forEach((input) => {
+    input.addEventListener('change', async () => {
+      const row = input.closest('.page-row');
+      const id = input.dataset.page;
+      const replyLimit = Number(row.querySelector('.limit-reply').value || 0);
+      const tokenLimit = Number(row.querySelector('.limit-token').value || 0);
+      input.disabled = true;
+      try {
+        const saved = await api(`/api/pages/${encodeURIComponent(id)}/limit`, {
+          method: 'POST',
+          body: { dailyReplyLimit: replyLimit, dailyTokenLimit: tokenLimit },
+        });
+        if (saved.config) state.config = saved.config;
+        const fresh = await api('/api/usage');
+        const page = (state.config.pages || []).find((p) => p.id === id);
+        const pu = (fresh.pages || []).find((x) => x.id === id) || {};
+        const line = row.querySelector('.page-usage-line');
+        if (line && page) line.textContent = usageLineText(page, pu);
+        toast('سقف روزانهٔ این صفحه ذخیره شد', 'success');
+      } catch (error) {
+        toast(error.message, 'error');
+      } finally {
+        input.disabled = false;
+      }
     });
   });
 
@@ -696,6 +747,20 @@ async function startInstagramLogin() {
 async function renderAi() {
   const ais = state.config.aiProviders || [];
   const pages = state.config.pages || [];
+  const usage = await api('/api/usage');
+
+  const usageOf = (p) => (usage.providers || []).find((x) => x.id === p.id) || {};
+
+  const usageLines = (p) => {
+    const d = usageOf(p);
+    if (!d.name && !d.id) return '';
+    const out = [`<small>میانگین هر پاسخ: ≈${nfmt(d.avgTokensPerReply)} توکن ${d.measured ? `(${nfmt(d.replyCount)} پاسخ واقعی)` : '(تخمین اولیه)'}</small>`];
+    if (d.usedTokens > 0) out.push(`<small>مصرف تاکنون: ${nfmt(d.usedTokens)} توکن در ${nfmt(d.replyCount)} پاسخ</small>`);
+    out.push(d.estimatedMessagesLeft != null
+      ? `<small>با موجودی فعلی: ≈ <b>${nfmt(d.estimatedMessagesLeft)} پاسخ</b> دیگر</small>`
+      : '<small class="muted">موجودی توکن وارد نشده؛ در «ویرایش» توکن باقی‌مانده را بگذار تا تعداد پاسخ‌ها حساب شود.</small>');
+    return out.join('');
+  };
 
   setTopbar(`<button class="btn btn-ghost" id="refresh-page">بروزرسانی</button>
     <button class="btn btn-primary" id="add-ai">+ افزودن سرویس AI</button>`);
@@ -721,6 +786,7 @@ async function renderAi() {
           ${testPill(p)}
           <small dir="ltr" style="direction:ltr">${esc(p.baseUrl)} · ${esc(p.model)}</small>
           <small>استفاده از این سرویس: <b>${usageCount(p, index)} صفحه</b> از ${pages.length} صفحهٔ متصل</small>
+          ${usageLines(p)}
           ${p.lastTestMessage ? `<small class="muted">آخرین تست: ${esc(p.lastTestMessage)}${p.lastTestAt ? ` · ${esc(timeAgo(p.lastTestAt))}` : ''}</small>` : ''}
         </div>
       </div>
@@ -737,6 +803,28 @@ async function renderAi() {
     ? `<div class="pages-list">${ais.map(providerRow).join('')}</div>`
     : `<div class="empty"><span class="emoji">🤖</span><h4>هنوز سرویس AI وصل نیست</h4><p>یک سرویس مثل OpenAI، OpenRouter یا Groq اضافه کن تا دستیار بتواند جواب بنویسد.</p></div>`;
 
+  const calcRows = ais.map((p, index) => {
+    const d = usageOf(p);
+    return `<tr>
+      <td><b>${esc(p.name)}</b>${index === 0 ? ' <span class="pill brand">پیش‌فرض</span>' : ''}<br><small class="muted" dir="ltr">${esc(p.model)}</small></td>
+      <td class="num">≈ ${nfmt(d.avgTokensPerReply)} ${d.measured ? '' : '<small class="muted">(تخمین)</small>'}</td>
+      <td class="num">${d.tokenBalance > 0 ? nfmt(d.tokenBalance) : '<span class="muted">وارد نشده</span>'}</td>
+      <td class="num">${d.estimatedMessagesLeft != null ? `<b>${nfmt(d.estimatedMessagesLeft)} پاسخ</b>` : '<span class="muted">—</span>'}</td>
+    </tr>`;
+  }).join('');
+
+  const calcCard = ais.length ? `
+      <section class="card">
+        <div class="card-head">
+          <div><h3>محاسبهٔ تعداد پاسخ هر AI با توکن موجود</h3><p>تقریبی، بر اساس میانگین واقعی مصرف همین برنامه</p></div>
+        </div>
+        <div class="table-wrap"><table class="table">
+          <thead><tr><th>سرویس</th><th>میانگین توکن هر پاسخ</th><th>موجودی توکن</th><th>پاسخ‌های باقی‌مانده</th></tr></thead>
+          <tbody>${calcRows}</tbody>
+        </table></div>
+        <p class="hint" style="margin-top:10px">هر پاسخ شامل پرامپت بلند، بررسی موضوع (اگر فعال باشد) و متن خروجی است؛ به همین دلیل «میانگین» از فراخوانی‌های واقعی خود برنامه حساب می‌شود و با اولین پیام‌ها دقیق‌تر می‌شود. تا قبل از آن ${nfmt(usage.defaultAvgTokensPerReply)} توکن فرض می‌شود. «موجودی توکن» را از داشبورد سرویس AI خودت بخوان و در «ویرایش» همان سرویس وارد کن.</p>
+      </section>` : '';
+
   $('#view').innerHTML = `
     <div class="stack">
       <section class="card">
@@ -748,6 +836,8 @@ async function renderAi() {
         <p class="hint" style="margin-top:14px">برای هر صفحهٔ اینستاگرام می‌توانی سرویس AI جداگانه انتخاب کنی: در «صفحات اینستاگرام»، کنار هر صفحه فهرست «این صفحه از کدام AI استفاده کند؟» را تغییر بده. چند صفحه هم می‌توانند روی یک سرویس مشترک باشند.</p>
         <div id="ai-test-result" style="margin-top:12px"></div>
       </section>
+
+      ${calcCard}
 
       <div class="note info">
         <span>💡</span>
@@ -827,6 +917,10 @@ function providerModal(provider) {
           placeholder="${provider?.apiKey ? 'ذخیره شده — برای تغییر مقدار جدید بنویس' : 'کلید را وارد کن'}" autocomplete="new-password" />
         <span class="hint">${provider?.apiKey ? '<span class="pill ok" style="margin-inline-end:6px">ذخیره شده</span>' : ''}کلید فقط رمزنگاری‌شده روی همین سیستم ذخیره می‌شود.</span>
       </label>
+      <label class="field"><span class="field-label">موجودی توکن باقی‌مانده (اختیاری)</span>
+        <input class="input" id="pv-balance" type="number" min="0" value="${provider?.tokenBalance || ''}" placeholder="مثلاً 5000000" />
+        <span class="hint">موجودی توکن را از داشبورد همان سرویس بخوان؛ با آن، تعداد پاسخ‌های باقی‌ماندهٔ این AI حساب می‌شود.</span>
+      </label>
       <div class="form-grid">
         <label class="field"><span class="field-label">مدل</span>
           <input class="input" id="pv-model" dir="ltr" style="text-align:left" value="${esc(provider?.model || 'gpt-4o-mini')}" />
@@ -891,6 +985,7 @@ function providerModal(provider) {
           timeoutSeconds: Number($('#pv-timeout').value || 45),
           scopeCheckEnabled: $('#pv-scope').checked,
           scopeCheckModel: $('#pv-scope-model').value.trim(),
+          tokenBalance: Number($('#pv-balance').value || 0),
         },
       });
       if (result.config) state.config = result.config;
@@ -1480,6 +1575,8 @@ async function renderGuide() {
           <li><b>سرویس‌های هوش مصنوعی:</b> لیست همهٔ API های AI متصل (OpenAI، OpenRouter، Groq، لوکال و…)؛ هرکدام را جداگانه تست یا ویرایش می‌کنی.</li>
           <li><b>نسبت دادن:</b> کنار هر صفحه فهرست «این صفحه از کدام AI استفاده کند؟» را انتخاب می‌کنی. می‌توانی چند صفحه را روی یک AI بگذاری یا هرکدام را جدا کنی.</li>
           <li><b>مسیر پیام:</b> وبهوک با هر پیام، شناسهٔ صفحه را می‌فرستد؛ برنامه صفحه را پیدا می‌کند، AI همان را انتخاب می‌کند، با پرامپت و گارد‌ریل جواب می‌سازد و با توکن همان صفحه ارسال می‌کند.</li>
+          <li><b>محاسبهٔ توکن:</b> در «سرویس‌های هوش مصنوعی» میانگین توکن هر پاسخ از فراخوانی‌های واقعی اندازه گرفته می‌شود؛ با وارد کردن «موجودی توکن» هر سرویس در همان‌جا، جدول بالای صفحه می‌گوید هر AI تقریباً چند پاسخ دیگر می‌تواند بدهد.</li>
+          <li><b>سقف روزانهٔ هر صفحه:</b> کنار هر صفحه دو فیلد «سقف پاسخ روزانه» و «سقف توکن روزانه» هست (خالی یا صفر = بدون سقف). با پر شدن سقف، پاسخ خودکار همان روز متوقف می‌شود، فردا خودکار ریست می‌شود و هر وقت بخواهی با تغییر همان فیلد بالا/پایین می‌شود. ردپای هر پاسخ مصرف امروز را نشان می‌دهد.</li>
         </ul>
       </section>
 

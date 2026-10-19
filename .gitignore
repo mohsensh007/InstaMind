@@ -1,0 +1,10 @@
+bin/
+obj/
+data/
+.run/
+*.user
+*.suo
+.vs/
+
+# Freebuff workspace metadata
+.freebuff/

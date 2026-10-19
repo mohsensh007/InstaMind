@@ -18,6 +18,17 @@
       "environmentVariables": {
         "ASPNETCORE_ENVIRONMENT": "Development"
       }
+    },
+    "https-openssl": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "applicationUrl": "https://localhost:7052;http://localhost:5298",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development",
+        "Kestrel__Certificates__Default__Path": ".run/localhost.pfx",
+        "Kestrel__Certificates__Default__Password": "instamind-local"
+      }
     }
   }
 }

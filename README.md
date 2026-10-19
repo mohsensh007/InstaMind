@@ -74,6 +74,24 @@ dotnet run
 
 هیچ دیتابیسی لازم نیست؛ همه‌چیز در پوشهٔ `data/` ذخیره می‌شود.
 
+### HTTPS محلی (بدون دامنه)
+
+برای تست روی `https://localhost` بدون خرید دامنه، پروفایل **`https-openssl`** آماده است:
+
+```bash
+dotnet run --launch-profile https-openssl
+```
+
+- گواهی self-signed با **OpenSSL** ساخته می‌شود (`SAN: localhost, 127.0.0.1, ::1`) و با
+  پروفایل launch بارگذاری می‌شود؛ پورت‌ها `https://localhost:7052` و `http://localhost:5298`.
+- برای اولین بار (فقط یک بار، در PowerShell):
+  `certutil -user -addstore Root .run\localhost.crt`
+  تا مرورگر اخطار «not secure» ندهد. (برای لغو: `certutil -user -delstore Root <thumbprint>`)
+- اگر قبلاً با `dotnet dev-certs https --trust` کار کرده‌ای، پروفایل `https` هم همان گواهی dev را استفاده می‌کند.
+- فایل‌های گواهی در `.run/` می‌مانند که در `.gitignore` هست؛ کلید خصوصی هرگز کامیت نمی‌شود.
+- وبهوک و OAuth روی HTTPS محلی هم کار می‌کنند (`webhookUrl` و `oauthRedirectUri` خودکار `https` می‌شوند)،
+  ولی متا فقط آدرس‌های عمومی را می‌پذیرد — برای اتصال واقعی همچنان به دامنه/تونل (ngrok و …) نیاز است.
+
 ### ۱) اتصال صفحهٔ اینستاگرام (بدون دادن پسورد)
 برو به **صفحات اینستاگرام**:
 

@@ -1,0 +1,8 @@
+{
+  "name": "InstaMind",
+  "description": "دستیار هوشمند دایرکت اینستاگرام با پشتیبانی از چند صفحه، هوش مصنوعی، دانشنامه و گاردریل‌های پیشرفته",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

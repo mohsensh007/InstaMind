@@ -12,6 +12,7 @@ const state = {
   activeConvData: null,
   playground: [],
   labBusy: false,
+  browserTimer: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -243,14 +244,14 @@ function updateSidebar() {
 
   const pages = state.config.pages || [];
   const ais = state.config.aiProviders || [];
-  const live = state.config.instagram.mode === 'live';
-  const liveReady = Boolean(state.meta?.liveReady);
+  const mode = state.config.instagram.mode;
+  const browserMode = mode === 'browser';
   const aiReady = ais.some((p) => Boolean(p.apiKey)) || Boolean(state.config.ai.apiKey);
 
-  $('#mode-label').textContent = live
-    ? `اینستاگرام: ${pages.length} صفحهٔ متصل`
+  $('#mode-label').textContent = browserMode
+    ? (pages.length ? `اینستاگرام: ${pages.length} حساب مرورگر` : 'اینستاگرام: مرورگر (بدون حساب)')
     : 'اینستاگرام: سندباکس';
-  $('#dot-mode').className = `dot ${live ? (liveReady ? 'ok' : 'warn') : 'off'}`;
+  $('#dot-mode').className = `dot ${browserMode ? (pages.length ? 'ok' : 'warn') : 'off'}`;
 
   $('#ai-label').textContent = aiReady
     ? `AI: ${ais.length} سرویس${ais[0]?.model ? ` (${ais[0].model})` : ''}`
@@ -279,6 +280,7 @@ function updateSidebar() {
 const pages = {
   dashboard: { title: 'داشبورد', sub: 'نمای کلی وضعیت دستیار دایرکت', render: renderDashboard },
   connection: { title: 'صفحات اینستاگرام', sub: 'صفحه‌های متصل و هوش مصنوعی هرکدام', render: renderConnection },
+  browser: { title: 'حالت مرورگر (Selenium)', sub: 'یک کروم واقعی با نشست خودت؛ با ریتم انسانی جواب می‌دهد', render: renderBrowser },
   ai: { title: 'سرویس‌های هوش مصنوعی', sub: 'API های متصل، مدل‌ها و کلیدها', render: renderAi },
   persona: { title: 'شخصیت و قوانین', sub: 'دقیقاً مشخص کن دربارهٔ چه چیزهایی حرف بزند', render: renderPersona },
   knowledge: { title: 'دانشنامه', sub: 'تنها اطلاعاتی که دستیار اجازهٔ گفتنشان را دارد', render: renderKnowledge },
@@ -288,6 +290,7 @@ const pages = {
 };
 
 async function route() {
+  stopBrowserPolling();
   const name = (location.hash || '#dashboard').slice(1);
   state.page = pages[name] ? name : 'dashboard';
 
@@ -319,9 +322,8 @@ async function renderDashboard() {
   const conversations = await api('/api/conversations');
   const recent = conversations.slice(0, 5);
   const cfg = state.config;
-  const live = cfg.instagram.mode === 'live';
+  const browserMode = cfg.instagram.mode === 'browser';
   const aiReady = Boolean(cfg.ai.apiKey);
-  const liveReady = Boolean(state.meta?.liveReady);
   const pagesCount = (cfg.pages || []).length;
   const aisCount = (cfg.aiProviders || []).length;
   const topics = cfg.persona.allowedTopics || [];
@@ -338,11 +340,11 @@ async function renderDashboard() {
             <td><a class="btn btn-ghost btn-sm" href="#inbox" data-open="${esc(c.id)}">باز کردن</a></td>
           </tr>`).join('')}
         </tbody></table></div>`
-    : `<div class="empty"><span class="emoji">💬</span><h4>هنوز گفتگویی نیست</h4><p>از آزمایشگاه یک پیام تست بفرست یا حالت واقعی را وصل کن.</p></div>`;
+    : `<div class="empty"><span class="emoji">💬</span><h4>هنوز گفتگویی نیست</h4><p>از آزمایشگاه یک پیام تست بفرست یا حالت مرورگر را روشن کن.</p></div>`;
 
   const checklist = [
     { done: aisCount > 0, title: 'سرویس هوش مصنوعی', hint: aisCount ? `${aisCount} سرویس متصل — ${cfg.ai.model}` : 'یک سرویس AI با کلید API اضافه کن', href: '#ai' },
-    { done: pagesCount > 0, title: 'صفحات اینستاگرام', hint: pagesCount ? `${pagesCount} صفحه متصل${live ? ' · حالت واقعی' : ' · سندباکس'}` : 'یک صفحه با ورود به اینستاگرام وصل کن', href: '#connection' },
+    { done: pagesCount > 0, title: 'حساب‌های اینستاگرام', hint: pagesCount ? `${pagesCount} حساب متصل` : 'در «حالت مرورگر» یک حساب اضافه کن', href: '#browser' },
     { done: topics.length > 0, title: 'موضوعات مجاز', hint: topics.length ? `${topics.length} موضوع تعریف شده` : 'بدون موضوع، همه‌چیز رد می‌شود', href: '#persona' },
     { done: knowledgeCount > 0, title: 'دانشنامه', hint: knowledgeCount ? `${knowledgeCount} مورد ثبت شده` : 'قیمت، ارسال و ساعت کاری را وارد کن', href: '#knowledge' },
   ];
@@ -396,8 +398,8 @@ async function renderDashboard() {
               <span class="pill ${cfg.guardrails.strictMode ? 'ok' : 'warn'}">${cfg.guardrails.strictMode ? 'فعال' : 'غیرفعال'}</span>
             </div>
             <div class="switch-row">
-              <div><b>اینستاگرام</b><small>${pagesCount ? `${pagesCount} صفحه متصل` : 'صفحه‌ای وصل نیست'} · ${live ? 'ارسال واقعی از طریق Meta' : 'سندباکس — بدون ارسال واقعی'}</small></div>
-              <span class="pill ${live ? (liveReady ? 'ok' : 'bad') : 'brand'}">${pagesCount ? (live ? 'وصل' : 'سندباکس') : 'بدون صفحه'}</span>
+              <div><b>اینستاگرام</b><small>${browserMode ? `مرورگر (Selenium) — ${pagesCount} حساب` : 'سندباکس — بدون ارسال واقعی'}</small></div>
+              <span class="pill ${browserMode ? 'ok' : 'brand'}">${browserMode ? 'مرورگر' : 'سندباکس'}</span>
             </div>
             <div class="switch-row">
               <div><b>هوش مصنوعی</b><small>${aisCount ? `${aisCount} سرویس · ${esc(cfg.ai.model || '')}` : 'سرویسی وصل نیست'}</small></div>
@@ -441,13 +443,10 @@ async function renderConnection() {
   const pages = state.config.pages || [];
   const ais = state.config.aiProviders || [];
   const usage = await api('/api/usage');
-  const webhook = state.meta?.webhookUrl || `${location.origin}/webhook/instagram`;
-  const redirectUri = state.meta?.oauthRedirectUri || `${location.origin}/oauth/instagram/callback`;
-  const ready = Boolean(state.meta?.oauthReady);
 
   setTopbar(`<button class="btn btn-ghost" id="refresh-page">بروزرسانی</button>
     <button class="btn btn-ghost" id="save-config">ذخیرهٔ تنظیمات</button>
-    <button class="btn btn-primary" id="add-page">+ افزودن صفحه</button>`);
+    <button class="btn btn-primary" id="add-page">+ افزودن حساب</button>`);
 
   $('#refresh-page').addEventListener('click', () => route());
   $('#save-config').addEventListener('click', async () => {
@@ -458,7 +457,7 @@ async function renderConnection() {
       toast(error.message, 'error');
     }
   });
-  $('#add-page').addEventListener('click', () => startInstagramLogin());
+  $('#add-page').addEventListener('click', () => { location.hash = '#browser'; });
 
   const aiSelect = (page) => `
     <select class="input page-ai" data-page="${esc(page.id)}">
@@ -479,9 +478,6 @@ async function renderConnection() {
   };
 
   const pageRow = (page) => {
-    const expiry = page.tokenExpiresAt ? new Date(page.tokenExpiresAt) : null;
-    const expiryText = expiry ? new Intl.DateTimeFormat('fa-IR', { dateStyle: 'medium' }).format(expiry) : 'نامشخص';
-    const daysLeft = expiry ? Math.ceil((expiry.getTime() - Date.now()) / 86400000) : null;
     const testPill = page.lastTestOk == null
       ? '<span class="pill warn">تست نشده</span>'
       : page.lastTestOk
@@ -498,9 +494,9 @@ async function renderConnection() {
           <div class="page-info">
             <b>@${esc(page.username || 'بدون نام')}</b>
             ${testPill}
-            <small dir="ltr" style="direction:ltr">IG User ID: ${esc(page.igUserId)}</small>
-            <small>اتصال: ${esc(timeAgo(page.connectedAt))} · انقضای توکن: ${esc(expiryText)}${daysLeft != null ? ` (${daysLeft} روز مانده)` : ''}</small>
-            <small>پاسخ‌دهنده: <b class="assigned-name">${esc(assigned)}</b>${page.subscribed ? ' · وبهوک فعال ✓' : ''}</small>
+            <small dir="ltr" style="direction:ltr">${page.igUserId ? `ID: ${esc(page.igUserId)}` : `حساب مرورگر: @${esc(page.browserUsername || page.username || '—')}`}</small>
+            <small>افزوده شده: ${esc(timeAgo(page.connectedAt))}</small>
+            <small>پاسخ‌دهنده: <b class="assigned-name">${esc(assigned)}</b></small>
             <small class="page-usage-line">${esc(usageLineText(page, (usage.pages || []).find((x) => x.id === page.id) || {}))}</small>
             <div class="limit-inputs">
               <label class="limit-field"><span>سقف پاسخ روزانه</span>
@@ -520,7 +516,6 @@ async function renderConnection() {
           </label>
           <div class="page-actions">
             <button class="btn btn-ghost btn-sm" data-test-page="${esc(page.id)}">تست اتصال</button>
-            <button class="btn btn-ghost btn-sm" data-refresh-page="${esc(page.id)}">تمدید توکن</button>
             <button class="btn btn-danger btn-sm" data-del-page="${esc(page.id)}">حذف</button>
           </div>
         </div>
@@ -529,19 +524,18 @@ async function renderConnection() {
 
   const pagesBlock = pages.length
     ? `<div class="pages-list">${pages.map(pageRow).join('')}</div>
-       <p class="hint" style="margin-top:14px">برای اتصال صفحهٔ دیگر، روی «+ افزودن صفحه» بزن و با اکانت Professional آن صفحه وارد شو. هر صفحه توکن و AI جداگانهٔ خودش را دارد.</p>`
+       <p class="hint" style="margin-top:14px">هر حساب پنجرهٔ کروم، نشست، ریتم و شمارشگرهای خودش را دارد و هیچ‌کدام با بقیه قاطی نمی‌شوند؛ حساب تازه را در «حالت مرورگر» اضافه کن.</p>`
     : `<div class="login-hero">
-        <button class="btn btn-primary js-login">🔓 ورود با اینستاگرام (اتصال اولین صفحه)</button>
-        <p class="hint">یک کلیک کافی است: برنامه خودش توکن ۶۰ روزه می‌گیرد، پروفایل پیج را می‌خواند و عضویت وبهوک پیام‌ها را ثبت می‌کند. پسورد هرگز به این برنامه نمی‌رسد.</p>
-        ${ready ? '' : '<p class="hint">⚠️ اول در «تنظیمات اپ متا»ٔ پایین همین صفحه، <b>App ID</b> و <b>App Secret</b> را وارد کن — فقط یک بار لازم است.</p>'}
+        <a class="btn btn-primary" href="#browser">🌐 رفتن به «حالت مرورگر» و افزودن حساب</a>
+        <p class="hint">حساب را با یوزرنیم و پسورد خودت داخل پنجرهٔ کروم اضافه می‌کنی؛ هر حساب یک پنجرهٔ جداگانه دارد.</p>
       </div>`;
 
   $('#view').innerHTML = `
     <div class="stack">
       <section class="card">
         <div class="card-head">
-          <div><h3>صفحات متصل اینستاگرام</h3><p>این‌ها صفحه‌هایی هستند که الان به دستیار وصل‌اند؛ برای هرکدام AI پاسخ‌دهنده را انتخاب کن.</p></div>
-          <span class="pill ${pages.length ? 'ok' : 'brand'}">${pages.length} صفحه متصل</span>
+          <div><h3>حساب‌های متصل اینستاگرام</h3><p>این‌ها حساب‌هایی هستند که الان به دستیار وصل‌اند؛ برای هرکدام AI پاسخ‌دهنده را انتخاب کن.</p></div>
+          <span class="pill ${pages.length ? 'ok' : 'brand'}">${pages.length} حساب متصل</span>
         </div>
         ${pagesBlock}
         <div id="page-test-result" style="margin-top:12px"></div>
@@ -549,60 +543,20 @@ async function renderConnection() {
 
       <section class="card">
         <div class="card-head">
-          <div><h3>تنظیمات اپ متا (فقط یک بار)</h3><p>App ID و App Secret برای همهٔ صفحه‌ها مشترک است.</p></div>
-          <span class="pill ${ready ? 'ok' : 'warn'}">${ready ? 'آماده' : 'تکمیل نشده'}</span>
+          <div><h3>حالت اتصال</h3><p>اول با سندباکس همه‌چیز را تست کن، بعد حالت مرورگر را روشن کن.</p></div>
+          <span class="pill ${ig.mode === 'browser' ? 'ok' : 'brand'}">${ig.mode === 'browser' ? 'حالت مرورگر' : 'حالت سندباکس'}</span>
         </div>
-        <div class="form-grid">
-          ${field('Instagram App ID', 'instagram.appId', { ltr: true, placeholder: '1234567890', hint: 'از App Dashboard → Instagram → API setup with Instagram login.' })}
-          ${secretField('App Secret', 'instagram.appSecret', 'برای تبادل کد ورود و بررسی امضای وبهوک.')}
-          <div class="span-full">${field('Redirect URI (اختیاری)', 'instagram.redirectUri', { ltr: true, placeholder: redirectUri, hint: 'خالی بماند، آدرس زیر استفاده می‌شود. باید عیناً در داشبورد متا ثبت شده باشد.' })}</div>
+        <div class="segmented" id="mode-seg">
+          <button class="seg ${ig.mode === 'sandbox' ? 'active' : ''}" data-mode="sandbox">🧪 سندباکس</button>
+          <button class="seg ${ig.mode === 'browser' ? 'active' : ''}" data-mode="browser">🌐 مرورگر (Selenium)</button>
         </div>
-        <div style="margin-top:16px">
-          <span class="field-label">آدرس بازگشت (در Meta → Business login → OAuth redirect URIs ثبت کن)</span>
-          <div class="code-block" style="margin-top:6px"><span>${esc(redirectUri)}</span><button data-copy="${esc(redirectUri)}">کپی</button></div>
-        </div>
-        <div class="login-hero" style="margin-top:16px">
-          <button class="btn btn-primary js-login">🔓 ورود با اینستاگرام برای افزودن صفحه</button>
-          <p class="hint">هر بار که بزنی، یک صفحهٔ دیگر هم به لیست بالا اضافه می‌شود.</p>
+        <input type="hidden" data-path="instagram.mode" id="mode-value" value="${esc(ig.mode)}" />
+        <p class="hint" style="margin-top:12px">در حالت سندباکس هیچ پیامی به اینستاگرام ارسال نمی‌شود. در حالت «مرورگر» برنامه برای هر حساب یک پنجرهٔ کروم واقعی باز می‌کند، دایرکت همان حساب را می‌خواند و با ریتم انسانی جواب می‌دهد — تنظیماتش در صفحهٔ «حالت مرورگر» است.</p>
+        <div class="switch-row" style="margin-top:8px">
+          <div><b>پاسخ خودکار</b><small>${ig.autoReplyEnabled ? 'دستیار به پیام‌های جدید جواب می‌دهد' : 'هیچ پیامی ارسال نمی‌شود'}</small></div>
+          <label class="switch"><input type="checkbox" data-path="instagram.autoReplyEnabled" ${ig.autoReplyEnabled ? 'checked' : ''} /><i></i></label>
         </div>
       </section>
-
-      <div class="split">
-        <section class="card">
-          <div class="card-head">
-            <div><h3>حالت اتصال</h3><p>اول با سندباکس همه‌چیز را تست کن، بعد حالت واقعی را روشن کن.</p></div>
-            <span class="pill ${ig.mode === 'live' ? 'ok' : 'brand'}">${ig.mode === 'live' ? 'حالت واقعی' : 'حالت سندباکس'}</span>
-          </div>
-          <div class="segmented" id="mode-seg">
-            <button class="seg ${ig.mode === 'sandbox' ? 'active' : ''}" data-mode="sandbox">🧪 سندباکس</button>
-            <button class="seg ${ig.mode === 'live' ? 'active' : ''}" data-mode="live">🔗 واقعی (Meta)</button>
-          </div>
-          <input type="hidden" data-path="instagram.mode" id="mode-value" value="${esc(ig.mode)}" />
-          <p class="hint" style="margin-top:12px">در حالت سندباکس هیچ پیامی به اینستاگرام ارسال نمی‌شود؛ در حالت واقعی، پیام‌ها از طریق Instagram Messaging API رسمی متا و با توکن همان صفحه‌ای که پیام را گرفته ارسال می‌شوند.</p>
-          <div class="switch-row" style="margin-top:8px">
-            <div><b>پاسخ خودکار</b><small>${ig.autoReplyEnabled ? 'دستیار به پیام‌های جدید جواب می‌دهد' : 'هیچ پاسخی ارسال نمی‌شود'}</small></div>
-            <label class="switch"><input type="checkbox" data-path="instagram.autoReplyEnabled" ${ig.autoReplyEnabled ? 'checked' : ''} /><i></i></label>
-          </div>
-        </section>
-
-        <div class="stack">
-          <section class="card">
-            <div class="card-head" style="margin-bottom:10px"><div><h3>وبهوک</h3><p>Meta پیام‌های همهٔ صفحه‌ها را به همین آدرس می‌فرستد</p></div></div>
-            <div class="code-block"><span>${esc(webhook)}</span><button data-copy="${esc(webhook)}">کپی</button></div>
-            <p class="hint" style="margin-top:10px">در Meta → Webhooks این آدرس را Callback URL بگذار و فیلد <span class="inline-code">messages</span> را Subscribe کن. برنامه با هر ورود، عضویت همان صفحه را خودکار ثبت می‌کند و پیام هر صفحه را به AI خودش می‌فرستد.</p>
-            <div class="form-grid" style="margin-top:12px">
-              ${field('Verify Token', 'instagram.verifyToken', { ltr: true, hint: 'یک رشتهٔ دلخواه؛ همان را در تنظیمات وبهوک متا وارد کن.' })}
-              ${field('نسخهٔ Graph API', 'instagram.apiVersion', { ltr: true, placeholder: 'v23.0' })}
-              <div class="span-full">${field('Graph Base URL', 'instagram.graphBaseUrl', { ltr: true, placeholder: 'https://graph.instagram.com' })}</div>
-            </div>
-          </section>
-
-          <div class="note danger">
-            <span>⛔</span>
-            <div><b>ورود با یوزرنیم و پسورد را در این برنامه نگذار.</b> برای دایرکت فقط API رسمی متا مجاز است؛ ورود خودکار با پسورد به بلاک شدن اکانت ختم می‌شود.</div>
-          </div>
-        </div>
-      </div>
     </div>`;
 
   $$('#mode-seg .seg').forEach((button) => {
@@ -685,24 +639,6 @@ async function renderConnection() {
     });
   });
 
-  $$('[data-refresh-page]').forEach((button) => {
-    button.addEventListener('click', async () => {
-      const original = button.textContent;
-      button.disabled = true;
-      button.textContent = 'در حال تمدید…';
-      try {
-        const result = await api(`/api/pages/${encodeURIComponent(button.dataset.refreshPage)}/refresh`, { method: 'POST' });
-        toast(result.message, result.ok ? 'success' : 'error');
-        await loadConfig();
-        await route();
-      } catch (error) {
-        toast(error.message, 'error');
-        button.disabled = false;
-        button.textContent = original;
-      }
-    });
-  });
-
   $$('[data-del-page]').forEach((button) => {
     button.addEventListener('click', async () => {
       if (!confirm('این صفحه از لیست صفحات حذف شود؟ (فقط از این برنامه پاک می‌شود؛ اکانت اینستاگرام دست‌نخورده می‌ماند)')) return;
@@ -716,32 +652,6 @@ async function renderConnection() {
       }
     });
   });
-
-  $$('.js-login').forEach((button) => {
-    button.addEventListener('click', () => startInstagramLogin());
-  });
-}
-
-async function startInstagramLogin() {
-  const appIdInput = $('[data-path="instagram.appId"]');
-  const secretInput = $('[data-path="instagram.appSecret"]');
-  const appId = (appIdInput?.value || '').trim();
-  const typedSecret = (secretInput?.value || '').trim();
-  const storedSecret = Boolean(state.config.instagram.appSecret);
-
-  if (!appId || (!typedSecret && !storedSecret)) {
-    toast('اول App ID و App Secret را در «تنظیمات اپ متا» وارد کن؛ فقط یک بار لازم است.', 'error');
-    (appIdInput && !appId ? appIdInput : secretInput)?.focus();
-    (appIdInput && !appId ? appIdInput : secretInput)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    return;
-  }
-
-  try {
-    await saveFromView({ silent: true });
-    window.location.href = '/oauth/instagram/start';
-  } catch (error) {
-    toast(error.message, 'error');
-  }
 }
 
 async function renderAi() {
@@ -1529,52 +1439,40 @@ function renderLabMessages() {
 /* ---------------------------------- guide --------------------------------- */
 
 async function renderGuide() {
-  const webhook = state.meta?.webhookUrl || `${location.origin}/webhook/instagram`;
-  const redirectUri = state.meta?.oauthRedirectUri || `${location.origin}/oauth/instagram/callback`;
-
   $('#view').innerHTML = `
     <div class="stack">
-      <div class="note danger">
-        <span>⛔</span>
-        <div><b>چرا با یوزرنیم و پسورد کار نمی‌کند؟</b> اینستاگرام هیچ API رسمی برای ورود با پسورد و ارسال دایرکت ندارد. ربات‌هایی که این کار را می‌کنند از API داخلی و مهندسی معکوس استفاده می‌کنند؛ نتیجه‌اش بلاک شدن اکانت، از دست رفتن پیام‌ها و نقض قوانین متاست. مسیر درست: تبدیل اکانت به Professional و استفاده از Instagram Messaging API.</div>
-      </div>
-
       <section class="card">
         <div class="card-head"><div><h3>پیش‌نیازها</h3><p>چیزهایی که قبل از شروع لازم داری</p></div></div>
         <dl class="kv">
-          <dt>اکانت اینستاگرام</dt><dd>Business یا Creator (در تنظیمات اکانت به Professional سوییچ کن)</dd>
-          <dt>اپ متا</dt><dd>یک اپ در developers.facebook.com با محصول <b>Instagram</b> و «API setup with Instagram login»</dd>
-          <dt>App ID و App Secret</dt><dd>در تنظیمات همان اپ؛ این دو را در بخش «تنظیمات اپ متا»ٔ صفحهٔ «صفحات اینستاگرام» وارد کن (فقط یک بار، برای همهٔ صفحه‌ها مشترک)</dd>
-          <dt>دسترسی‌ها</dt><dd><span class="inline-code">instagram_business_basic</span> و <span class="inline-code">instagram_business_manage_messages</span></dd>
-          <dt>آدرس عمومی</dt><dd>برای وبهوک به یک دامنه یا تونل HTTPS نیاز داری</dd>
-          <dt>صفحهٔ فیسبوک</dt><dd>در این مسیر لازم نیست. فقط اگر از Facebook Login استفاده می‌کنی، پیج وصل‌شده لازم است.</dd>
+          <dt>اکانت اینستاگرام</dt><dd>یک اکانت معمولی؛ اگر دو حساب داری، هر کدام حساب جداگانهٔ خودش را در برنامه می‌سازد</dd>
+          <dt>گوگل کروم</dt><dd>نصب و به‌روز؛ برنامه یک پنجرهٔ کروم برای هر حساب باز می‌کند</dd>
+          <dt>یوزرنیم و پسورد</dt><dd>در صفحهٔ «حالت مرورگر» وارد می‌کنی؛ رمزنگاری‌شده در پوشهٔ <span class="inline-code">data/</span> ذخیره می‌شود و فقط ماسک در API برمی‌گردد</dd>
+          <dt>کد تأیید</dt><dd>اولین ورود اینستاگرام کدی به ایمیل می‌فرستد؛ کادر همان کد در پنل برنامه است و با وارد کردنش ورود کامل می‌شود</dd>
+          <dt>سرویس هوش مصنوعی</dt><dd>یک کلید API در صفحهٔ «سرویس‌های AI» برای ساختن جواب‌ها</dd>
         </dl>
       </section>
 
       <section class="card">
-        <div class="card-head"><div><h3>گام‌به‌گام</h3><p>حدود ۱۵ تا ۳۰ دقیقه</p></div></div>
+        <div class="card-head"><div><h3>گام‌به‌گام</h3><p>حدود ۵ دقیقه</p></div></div>
         <div class="steps">
-          <div class="step"><div class="step-body"><h4>اپ متا را بساز</h4><p>در developers.facebook.com یک اپ Business بساز و محصول <b>Instagram</b> را اضافه کن، سپس «API setup with Instagram login» را کامل کن.</p></div></div>
-          <div class="step"><div class="step-body"><h4>آدرس بازگشت را ثبت کن</h4><p>در Business login settings → OAuth redirect URIs این آدرس را دقیقاً اضافه کن:</p>
-            <div class="code-block" style="margin-top:10px"><span>${esc(redirectUri)}</span><button data-copy="${esc(redirectUri)}">کپی</button></div>
-            <p class="hint" style="margin-top:8px">برای اتصال از اینترنت از یک تونل مثل ngrok یا Cloudflare Tunnel استفاده کن تا آدرس https داشته باشی و آن را در همین فیلدها ثبت کن.</p></div></div>
-          <div class="step"><div class="step-body"><h4>App ID و App Secret را وارد کن</h4><p>در بخش «تنظیمات اپ متا»ٔ صفحهٔ «صفحات اینستاگرام» این دو مقدار را وارد کن (فقط یک بار). App Secret فقط سمت سرور استفاده می‌شود و رمزنگاری‌شده ذخیره می‌گردد.</p></div></div>
-          <div class="step"><div class="step-body"><h4>دکمهٔ «ورود با اینستاگرام» را بزن</h4><p>با یک ورود، همه‌چیز تمام می‌شود: به صفحهٔ ورود خود اینستاگرام می‌روی، با اکانت Professional وارد می‌شوی و دسترسی پیام‌ها را می‌دهی؛ برنامه خودش توکن می‌گیرد، پروفایل را می‌خواند و عضویت وبهوک را ثبت می‌کند. پسورد هرگز به این برنامه نمی‌رسد. برای اتصال صفحه‌های بعدی هم همین دکمه (یا «+ افزودن صفحه») را بزن.</p></div></div>
-          <div class="step"><div class="step-body"><h4>وبهوک را ثبت کن</h4><p>در بخش Webhooks اپ، Callback URL را روی آدرس زیر بگذار و همان Verify Token را وارد کن. فیلد <span class="inline-code">messages</span> را هم Subscribe کن. برنامه بعد از اتصال، عضویت اکانت را با <span class="inline-code">subscribed_apps</span> خودکار ثبت می‌کند.</p>
-            <div class="code-block" style="margin-top:10px"><span>${esc(webhook)}</span><button data-copy="${esc(webhook)}">کپی</button></div></div></div>
-          <div class="step"><div class="step-body"><h4>تست کن</h4><p>یک دایرکت از یک اکانت دیگر بفرست و در «گفتگوها» ببین. برای تست بدون ارسال واقعی هم همیشه «آزمایشگاه» در دسترس است.</p></div></div>
-          <div class="step"><div class="step-body"><h4>اتصال هر بخش را جداگانه تست کن</h4><p>کنار هر صفحه در «صفحات اینستاگرام» دکمهٔ «تست اتصال» هست که با توکن همان صفحه از Meta جواب می‌گیرد، و کنار هر سرویس در «سرویس‌های هوش مصنوعی» دکمهٔ «تست اتصال» که یک پاسخ آزمایشی از مدل می‌گیرد. هر دو را قبل از انتظار از پاسخ خودکار بزن.</p></div></div>
-          <div class="step"><div class="step-body"><h4>تست نهایی: پیام مستقیم</h4><p>از یک اکانت دیگر به پیج وصل‌شده دایرکت بفرست؛ باید در «گفتگوها» پیام بیاید و پاسخ AI با همان صفحه ارسال شود. اگر پاسخ نیامد، وضعیت وبهوک و عضویت <span class="inline-code">subscribed_apps</span> را در همان صفحهٔ «صفحات اینستاگرام» چک کن.</p></div></div>
+          <div class="step"><div class="step-body"><h4>حساب را اضافه کن</h4><p>در صفحهٔ «حالت مرورگر» روی «افزودن حساب» بزن، یوزرنیم و پسورد را وارد کن و ذخیره کن. برای حساب دوم و سوم هم همین کار را تکرار کن — هر کدام پنجرهٔ کروم جداگانهٔ خودش را می‌گیرد.</p></div></div>
+          <div class="step"><div class="step-body"><h4>وارد شو</h4><p>روی «ورود با حساب ذخیره‌شده» همان کارت بزن؛ یوزرنیم و پسورد داخل صفحهٔ ورود خود اینستاگرام تایپ می‌شود. اگر اینستاگرام کد تأیید خواست، کدی که به ایمیلت فرستاده را در کادر همین صفحه وارد کن تا ورود کامل شود. نشست در پوشهٔ پروفایل همان حساب ذخیره می‌شود و بارهای بعد لازم نیست.</p></div></div>
+          <div class="step"><div class="step-body"><h4>سرویس AI را وصل کن</h4><p>در «سرویس‌های AI» یک سرویس با کلید API بساز و کنار هر حساب در «صفحات اینستاگرام» مشخص کن از کدام AI استفاده کند؛ هر حساب می‌تواند AI جداگانه داشته باشد.</p></div></div>
+          <div class="step"><div class="step-body"><h4>حالت مرورگر را روشن کن</h4><p>حالت اتصال را روی «🌐 مرورگر (Selenium)» بگذار، «کارگر مرورگر روشن باشد» را روشن کن و ذخیره کن. از همین لحظه برنامه دایرکت هر حساب را نگاه می‌کند.</p></div></div>
+          <div class="step"><div class="step-body"><h4>تست کن</h4><p>«تست مرورگر» تعداد گفتگوهای لیست دایرکت را نشان می‌دهد و «اسکن دستی دایرکت» یک پاس دستی انجام می‌دهد. برای تست بدون ارسال واقعی هم «آزمایشگاه» همیشه در دسترس است.</p></div></div>
+          <div class="step"><div class="step-body"><h4>کامنت‌به‌دایرکت را تنظیم کن (اختیاری)</h4><p>در همان صفحهٔ «حالت مرورگر»، زیر هر حساب بخش «کامنت → دایرکت» هست: آدرس پست، کلمهٔ کلیدی و اینکه فقط به فالوورها پیام بدهد. برنامه هر چند دقیقه کامنت‌های تازه را می‌خواند، فالو بودن طرف را بررسی می‌کند و بعد با همان ریتم انسانی پیام می‌فرستد.</p></div></div>
+          <div class="step"><div class="step-body"><h4>تست نهایی: پیام مستقیم</h4><p>از یک اکانت دیگر به حساب وصل‌شده دایرکت بفرست؛ باید در «گفتگوها» پیام بیاید و پاسخ AI با همان حساب ارسال شود. اگر نیامد، وضعیت همان حساب را در صفحهٔ «حالت مرورگر» ببین.</p></div></div>
         </div>
       </section>
 
       <section class="card">
-        <div class="card-head"><div><h3>چند صفحه و چند هوش مصنوعی</h3><p>هر صفحه می‌تواند AI جداگانه داشته باشد</p></div></div>
+        <div class="card-head"><div><h3>چند حساب و چند هوش مصنوعی</h3><p>هر حساب می‌تواند AI و رفتار جداگانه داشته باشد</p></div></div>
         <ul class="muted small" style="margin:0;padding-inline-start:18px;line-height:2">
-          <li><b>صفحات اینستاگرام:</b> لیست همهٔ پیج‌های متصل اینجاست؛ برای هرکدام «تست اتصال»، «تمدید توکن» و «حذف» داری و با «+ افزودن صفحه» پیج بعدی را وصل می‌کنی.</li>
+          <li><b>حساب‌های اینستاگرام:</b> لیست همهٔ حساب‌های متصل اینجاست؛ برای هرکدام «تست اتصال» و «حذف» داری و حساب تازه را در «حالت مرورگر» اضافه می‌کنی.</li>
           <li><b>سرویس‌های هوش مصنوعی:</b> لیست همهٔ API های AI متصل (OpenAI، OpenRouter، Groq، لوکال و…)؛ هرکدام را جداگانه تست یا ویرایش می‌کنی.</li>
           <li><b>نسبت دادن:</b> کنار هر صفحه فهرست «این صفحه از کدام AI استفاده کند؟» را انتخاب می‌کنی. می‌توانی چند صفحه را روی یک AI بگذاری یا هرکدام را جدا کنی.</li>
-          <li><b>مسیر پیام:</b> وبهوک با هر پیام، شناسهٔ صفحه را می‌فرستد؛ برنامه صفحه را پیدا می‌کند، AI همان را انتخاب می‌کند، با پرامپت و گارد‌ریل جواب می‌سازد و با توکن همان صفحه ارسال می‌کند.</li>
+          <li><b>مسیر پیام:</b> هر حساب پنجرهٔ کروم خودش را دارد؛ برنامه دایرکت همان حساب را می‌خواند، AI همان حساب را انتخاب می‌کند، با پرامپت و گارد‌ریل جواب می‌سازد و در همان پنجره تایپ و ارسال می‌کند.</li>
+          <li><b>جدایی کامل:</b> پیام‌های حساب اول هرگز به حساب دوم نمی‌رسد؛ شمارشگر روزانه، مکث هر مخاطب، سقف ارسال و فایل وضعیت هر حساب جداگانه است.</li>
           <li><b>محاسبهٔ توکن:</b> در «سرویس‌های هوش مصنوعی» میانگین توکن هر پاسخ از فراخوانی‌های واقعی اندازه گرفته می‌شود؛ با وارد کردن «موجودی توکن» هر سرویس در همان‌جا، جدول بالای صفحه می‌گوید هر AI تقریباً چند پاسخ دیگر می‌تواند بدهد.</li>
           <li><b>سقف روزانهٔ هر صفحه:</b> کنار هر صفحه دو فیلد «سقف پاسخ روزانه» و «سقف توکن روزانه» هست (خالی یا صفر = بدون سقف). با پر شدن سقف، پاسخ خودکار همان روز متوقف می‌شود، فردا خودکار ریست می‌شود و هر وقت بخواهی با تغییر همان فیلد بالا/پایین می‌شود. ردپای هر پاسخ مصرف امروز را نشان می‌دهد.</li>
         </ul>
@@ -1582,13 +1480,12 @@ async function renderGuide() {
 
       <div class="split">
         <section class="card">
-          <div class="card-head"><div><h3>قوانین مهم متا</h3></div></div>
+          <div class="card-head"><div><h3>نکات روزمره</h3></div></div>
           <ul class="muted small" style="margin:0;padding-inline-start:18px;line-height:2">
-            <li>پاسخ فقط تا <b>۲۴ ساعت</b> بعد از آخرین پیام کاربر مجاز است؛ بعد از آن باید از تگ <span class="inline-code">HUMAN_AGENT</span> با شرایط خودش استفاده کنی.</li>
-            <li>ارسال پیام تبلیغاتی بدون اجازه (cold DM) مجاز نیست.</li>
-            <li>هر پیام حداکثر ۱۰۰۰ کاراکتر است.</li>
-            <li>برای production باید اپ را برای App Review بفرستی؛ در حالت Development فقط اکانت‌های تست کار می‌کنند.</li>
-            <li>اگر کاربر درخواست قطع ارتباط داد، باید متوقف شوی.</li>
+            <li>اگر کاربر درخواست قطع ارتباط داد، گفتگو را در «گفتگوها» مکث کن تا دستیار دیگر جواب ندهد.</li>
+            <li>سقف ارسال روزانه و فاصلهٔ اسکن را متناسب با حجم پیام‌ها تنظیم کن؛ شروع با حالت «🐢 آرام» عاقلانه است.</li>
+            <li>کد تأیید اینستاگرام فقط هنگام اولین ورود یا تغییر دستگاه لازم می‌شود؛ بعد از آن نشست در پوشهٔ پروفایل می‌ماند.</li>
+            <li>اگر پاسخی جا ماند، وضعیت همان حساب را در صفحهٔ «حالت مرورگر» ببین و «اسکن دستی دایرکت» را بزن.</li>
           </ul>
         </section>
 
@@ -1605,6 +1502,446 @@ async function renderGuide() {
     </div>`;
 }
 
+/* ------------------------------- browser mode ----------------------------- */
+
+const BROWSER_STATES = {
+  stopped: { label: 'بسته', cls: '' },
+  disabled: { label: 'خاموش', cls: '' },
+  starting: { label: 'در حال باز شدن', cls: 'warn' },
+  waiting_login: { label: 'منتظر ورود', cls: 'warn' },
+  waiting_code: { label: 'منتظر کد تأیید', cls: 'warn' },
+  ready: { label: 'آماده', cls: 'ok' },
+  scanning: { label: 'در حال اسکن', cls: 'brand' },
+  typing: { label: 'در حال نوشتن', cls: 'brand' },
+  outside_hours: { label: 'خارج از ساعت کاری', cls: 'warn' },
+  daily_cap: { label: 'سقف روزانه پر شد', cls: 'warn' },
+  error: { label: 'خطا', cls: 'bad' },
+};
+
+/** One account's status card (used by the overview list and by each account card). */
+function sessionHtml(status) {
+  if (!status) {
+    return '<div class="empty"><span class="emoji">🌐</span><h4>وضعیت در دسترس نیست</h4><p>یک بار صفحه را بروزرسانی کن.</p></div>';
+  }
+
+  const meta = BROWSER_STATES[status.state] || { label: status.state || '—', cls: '' };
+  const cell = (label, value) => `
+    <div style="border:1px solid rgba(255,255,255,.07);border-radius:12px;padding:10px 12px">
+      <small class="muted">${esc(label)}</small>
+      <div><b>${value}</b></div>
+    </div>`;
+
+  const label = status.pageUsername || status.username || status.pageId || 'حساب';
+
+  return `
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span class="pill ${meta.cls}">${esc(meta.label)}</span>
+      ${status.running ? '<span class="pill ok">کروم باز است</span>' : '<span class="pill">کروم بسته</span>'}
+      <span class="pill brand" dir="ltr">@${esc(label)}</span>
+      <span class="pill ${status.inWorkingHours ? 'ok' : 'warn'}">${esc(status.localTime)} · ${esc(status.workingHours)}</span>
+    </div>
+    <p class="hint" style="margin:10px 0 14px">${esc(status.message || '')}</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px">
+      ${cell('ارسال امروز', `${nfmt(status.sendsToday)}${status.dailySendCap > 0 ? ` از ${nfmt(status.dailySendCap)}` : ' (بدون سقف)'}`)}
+      ${cell('آخرین اسکن', status.lastScanAt ? esc(clock(status.lastScanAt)) : '—')}
+      ${cell('اسکن بعدی', status.nextScanAt ? esc(clock(status.nextScanAt)) : '—')}
+      ${cell('گفتگوهای دیده‌شده', nfmt(status.threadsSeen))}
+      ${cell('پاسخ‌های این نشست', nfmt(status.repliesSent))}
+      ${cell('حالت اتصال', esc(status.mode))}
+    </div>
+    ${status.lastError ? `<div class="note danger" style="margin-top:12px"><span>⚠️</span><div>${esc(status.lastError)}</div></div>` : ''}
+    ${status.waitingForLogin && !status.needsCode ? `<div class="note info" style="margin-top:12px"><span>🔑</span><div><b>در همان پنجرهٔ کروم وارد شو.</b> با اکانت خودت لاگین کن؛ اگر اینستاگرام کد فرستاد، کد همین‌جا وارد می‌شود.</div></div>` : ''}
+    ${status.needsCode ? `
+      <div class="note info" style="margin-top:12px"><span>📩</span><div>
+        <b>کد تأیید را وارد کن.</b> اینستاگرام کدی به ایمیل یا برنامهٔ احراز هویت فرستاده است؛ با وارد کردنش ورود کامل می‌شود.
+        <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap">
+          <input class="input" data-code-input="${esc(status.pageId || '')}" inputmode="numeric" autocomplete="one-time-code" placeholder="کد تأیید" dir="ltr" style="text-align:left;max-width:180px" />
+          <button class="btn btn-primary btn-sm send-code" data-code-page="${esc(status.pageId || '')}">ارسال کد</button>
+        </div>
+      </div></div>` : ''}`;
+}
+
+/** The overview box: one card per connected account. */
+function browserStatusHtml(payload) {
+  if (!payload) return sessionHtml(null);
+  const sessions = Array.isArray(payload.sessions) ? payload.sessions : [payload];
+  if (!sessions.length) {
+    return '<div class="empty"><span class="emoji">🌐</span><h4>حسابی اضافه نشده</h4><p>در پایین یک حساب اضافه کن تا پنجرهٔ کروم آن ساخته شود.</p></div>';
+  }
+  return sessions.map((session) => `
+    <div class="session-block" style="margin-bottom:16px;padding-bottom:16px;border-bottom:1px solid rgba(255,255,255,.06)">
+      ${sessionHtml(session)}
+    </div>`).join('');
+}
+
+/** Pushes a fresh payload into the overview and into every account card. */
+function applyStatus(payload) {
+  if (!payload) return;
+  const active = document.activeElement;
+  const box = $('#browser-status');
+  if (box && !(active && box.contains(active))) box.innerHTML = browserStatusHtml(payload);
+
+  (payload.sessions || []).forEach((session) => {
+    const el = document.getElementById(`account-status-${session.pageId}`);
+    if (!el || (active && el.contains(active))) return;
+    el.innerHTML = sessionHtml(session);
+  });
+}
+
+function startBrowserPolling() {
+  stopBrowserPolling();
+  state.browserTimer = setInterval(async () => {
+    if (state.page !== 'browser') {
+      stopBrowserPolling();
+      return;
+    }
+    try {
+      const payload = await api('/api/browser/status');
+      applyStatus(payload);
+    } catch {
+      /* transient; the next tick retries */
+    }
+  }, 4000);
+}
+
+function stopBrowserPolling() {
+  if (state.browserTimer) {
+    clearInterval(state.browserTimer);
+    state.browserTimer = null;
+  }
+}
+
+async function renderBrowser() {
+  const mode = state.config.instagram.mode;
+  const browser = state.config.browser || {};
+  const pages = state.config.pages || [];
+  let payload = null;
+  try {
+    payload = await api('/api/browser/status');
+  } catch {
+    payload = null;
+  }
+
+  setTopbar(`<button class="btn btn-ghost" id="browser-test">تست مرورگر</button>
+    <button class="btn btn-primary" id="save-config">ذخیرهٔ تنظیمات</button>`);
+
+  $('#save-config').addEventListener('click', async (event) => {
+    const button = event.currentTarget;
+    const original = button.textContent;
+    const previousProfile = state.config.browser?.responseProfile;
+    button.disabled = true;
+    button.textContent = 'در حال ذخیره…';
+    try {
+      await saveFromView();
+      if (state.config.browser?.responseProfile !== previousProfile) {
+        toast('پروفایل عوض شد؛ اعداد به مقدارهای پیشنهادی همان پروفایل تنظیم شدند', 'success');
+        await route();
+        return;
+      }
+      toast('ذخیره شد؛ چرخهٔ بعدی با همین مقادیر کار می‌کند', 'success');
+    } catch (error) {
+      toast(error.message, 'error');
+    } finally {
+      const live = $('#save-config');
+      if (live) {
+        live.disabled = false;
+        live.textContent = original;
+      }
+    }
+  });
+
+  const accountCard = (page, index) => {
+    const base = `pages.${index}`;
+    const st = (payload?.sessions || []).find((s) => s.pageId === page.id);
+    return `
+      <section class="card">
+        <div class="card-head">
+          <div><h3 dir="ltr">@${esc(page.username || page.browserUsername || 'بدون نام')}</h3><p>پنجره، نشست و شمارشگرهای کاملاً جدا از بقیهٔ حساب‌ها</p></div>
+          <span class="pill ${st?.running ? 'ok' : ''}">${st?.running ? 'کروم باز' : 'کروم بسته'}</span>
+        </div>
+        <div id="account-status-${esc(page.id)}">${sessionHtml(st)}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn btn-ghost btn-sm" data-act="start" data-page="${esc(page.id)}">روشن کردن</button>
+          <button class="btn btn-ghost btn-sm" data-act="login" data-page="${esc(page.id)}">ورود با حساب ذخیره‌شده</button>
+          <button class="btn btn-ghost btn-sm" data-act="test" data-page="${esc(page.id)}">تست</button>
+          <button class="btn btn-ghost btn-sm" data-act="scan" data-page="${esc(page.id)}">اسکن دستی</button>
+          <button class="btn btn-ghost btn-sm" data-act="stop" data-page="${esc(page.id)}">بستن</button>
+        </div>
+
+        <div class="form-grid" style="margin-top:14px">
+          ${field('یوزرنیم اینستاگرام', `${base}.browserUsername`, { ltr: true, placeholder: 'my_shop', hint: 'بدون @؛ فقط نام کاربری همین حساب.' })}
+          ${secretField('پسورد اینستاگرام', `${base}.browserPassword`, 'با AES-GCM رمزنگاری و در data/config.json ذخیره می‌شود؛ در پاسخ API فقط ماسک برمی‌گردد.')}
+        </div>
+        <div style="margin-top:6px">
+          ${toggleRow('ورود خودکار با حساب ذخیره‌شده', `${base}.browserAutoLogin`, 'وقتی صفحهٔ ورود آمد، خودش یوزرنیم و پسورد را می‌زند؛ کد تأیید را خودت وارد می‌کنی.')}
+          ${toggleRow('پاسخ‌دهی خودکار این حساب', `${base}.browserEnabled`, 'خاموش باشد، پنجرهٔ این حساب باز نمی‌شود و هیچ اسکن و ارسالی ندارد.')}
+        </div>
+
+        <details style="margin-top:12px">
+          <summary class="hint" style="cursor:pointer">کامنت → دایرکت (پست این حساب)</summary>
+          <div style="margin-top:10px">
+            ${toggleRow('فعال', `${base}.commentBot.enabled`, 'کامنت‌های تازهٔ پست را می‌خواند، فالو را چک می‌کند و به صاحب کامنت دایرکت می‌فرستد.')}
+          </div>
+          <div class="form-grid" style="margin-top:8px">
+            ${field('آدرس پست', `${base}.commentBot.postUrl`, { ltr: true, placeholder: 'https://www.instagram.com/p/XXXX یا کد پست', hint: 'لینک پست یا ریلزی که باید کامنت‌هایش خوانده شود.' })}
+            ${field('کلمهٔ کلیدی', `${base}.commentBot.keyword`, { hint: 'خالی = هر کامنت تازه. مثلاً: قیمت' })}
+            <div class="span-full">${toggleRow('فقط به کسی که فالو کرده پیام بده', `${base}.commentBot.requireFollow`, 'قبل از ارسال، برچسب «Follows you» در پروفایل طرف بررسی می‌شود؛ اگر خوانده نشد یا فالو نکرده، پیام واقعی فرستاده نمی‌شود.')}</div>
+            <div class="span-full">${textField('متن برای کسانی که فالو نکرده‌اند', `${base}.commentBot.followPrompt`, { rows: 2, hint: 'خالی = نادیده گرفتن کاملشان؛ اگر چیزی بنویسی، همان برایشان فرستاده می‌شود.' })}</div>
+            <div class="span-full">${textField('متن ثابت (خالی = AI خودش جواب می‌سازد)', `${base}.commentBot.message`, { rows: 3, hint: 'اگر اینجا چیزی بنویسی، همان عیناً فرستاده می‌شود؛ در حالت خالی، پیام از دل شخصیت و دانشنامهٔ همین حساب ساخته می‌شود.' })}</div>
+            ${field('سقف روزانهٔ دایرکت کامنت', `${base}.commentBot.maxPerDay`, { type: 'number', min: 0, max: 500, hint: '۰ = فقط سقف کلی ارسال روزانه اعمال می‌شود.' })}
+            ${field('مکث هر کامنت‌گذار (دقیقه)', `${base}.commentBot.cooldownMinutes`, { type: 'number', min: 0, max: 1440 })}
+            ${field('هر چند دقیقه چک شود', `${base}.commentBot.checkIntervalMinutes`, { type: 'number', min: 1, max: 1440 })}
+            ${field('حداکثر کامنت در هر پاس', `${base}.commentBot.maxPerPass`, { type: 'number', min: 1, max: 20 })}
+          </div>
+          <p class="hint" style="margin-top:8px">کامنت‌ها با همان ریتم ارسال بقیهٔ پیام‌ها فرستاده می‌شوند: یکی‌یکی، با مکث بین‌شان و با شمردن در سقف روزانه.</p>
+        </details>
+      </section>`;
+  };
+
+  const accountsBlock = pages.length
+    ? pages.map(accountCard).join('')
+    : `<div class="empty"><span class="emoji">🌐</span><h4>هنوز حسابی اضافه نشده</h4><p>در پایین یوزرنیم و پسورد اینستاگرام را وارد کن تا اولین پنجرهٔ کروم ساخته شود.</p></div>`;
+
+  $('#view').innerHTML = `
+    <div class="stack">
+      <section class="card">
+        <div class="card-head">
+          <div><h3>وضعیت حساب‌ها</h3><p>هر حساب یک پنجرهٔ کروم جداگانه با نشست، ریتم و شمارشگر خودش؛ هیچ‌کدام با هم قاطی نمی‌شوند.</p></div>
+          <span class="pill ${payload?.running ? 'ok' : ''}">${payload?.running ? 'روشن' : 'بسته'}</span>
+        </div>
+        <div id="browser-status">${browserStatusHtml(payload)}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+          <button class="btn btn-primary" id="browser-start">روشن کردن همهٔ پنجره‌ها</button>
+          <button class="btn btn-ghost" id="browser-scan">اسکن دستی دایرکت</button>
+          <button class="btn btn-ghost" id="browser-stop">بستن همهٔ پنجره‌ها</button>
+        </div>
+        <p class="hint" style="margin-top:10px">هر حساب بار اول روی صفحهٔ ورود اینستاگرام باز می‌شود؛ با «ورود با حساب ذخیره‌شده» خودکار پر می‌شود و اگر کد تأیید خواست، کد را در همان کارت وارد کن. نشست در پوشهٔ پروفایل همان حساب می‌ماند.</p>
+      </section>
+
+      ${accountsBlock}
+
+      <section class="card">
+        <div class="card-head">
+          <div><h3>افزودن حساب</h3><p>هر حساب یک پنجرهٔ کروم، یک پوشهٔ پروفایل و شمارشگرهای جداگانه دارد.</p></div>
+        </div>
+        <div class="form-grid">
+          <label class="field"><span class="field-label">یوزرنیم اینستاگرام</span>
+            <input class="input" id="new-account-user" dir="ltr" style="text-align:left" placeholder="my_shop" autocomplete="off" />
+          </label>
+          <label class="field"><span class="field-label">پسورد (اختیاری)</span>
+            <input class="input" id="new-account-pass" type="password" dir="ltr" style="text-align:left" placeholder="برای ورود خودکار" autocomplete="new-password" />
+            <span class="hint">خالی بماند، خودت داخل پنجرهٔ کروم وارد می‌شوی. پسورد با AES-GCM رمزنگاری می‌شود و در API فقط ماسک برمی‌گردد.</span>
+          </label>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:12px">
+          <button class="btn btn-primary" id="add-account">افزودن حساب</button>
+          <button class="btn btn-danger btn-sm" id="browser-forget">پاک کردن همهٔ پسوردها</button>
+        </div>
+        <div class="note info" style="margin-top:12px">
+          <span>🔐</span>
+          <div>کد تأیید و چالش امنیتی خودکار انجام نمی‌شود؛ کدی که اینستاگرام می‌فرستد را در همان کارت حساب وارد کن. هر کسی به این کامپیوتر و پوشهٔ <span class="inline-code">data/</span> دسترسی داشته باشد می‌تواند رمز را باز کند؛ اگر اکانت حساسی داری، پسورد را ذخیره نکن و دستی وارد شو.</div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div><h3>حالت اتصال</h3><p>دایرکت‌ها از کدام مسیر خوانده و فرستاده شوند.</p></div>
+          <span class="pill ${mode === 'browser' ? 'ok' : 'brand'}">${mode === 'browser' ? 'مرورگر' : 'سندباکس'}</span>
+        </div>
+        <div class="segmented" id="browser-mode-seg">
+          <button class="seg ${mode === 'sandbox' ? 'active' : ''}" data-mode="sandbox">🧪 سندباکس</button>
+          <button class="seg ${mode === 'browser' ? 'active' : ''}" data-mode="browser">🌐 مرورگر (Selenium)</button>
+        </div>
+        <input type="hidden" data-path="instagram.mode" id="browser-mode-value" value="${esc(mode)}" />
+        <div style="margin-top:14px">
+          ${toggleRow('کارگر مرورگر روشن باشد', 'browser.enabled', 'اگر خاموش باشد هیچ اسکن و ارسالی انجام نمی‌شود.')}
+          ${toggleRow('پنجرهٔ کروم دیده شود', 'browser.showWindow', 'روشن بگذار؛ برای ورود و دید زدن رفتار لازم است.')}
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div><h3>ریتم و محدودیت‌ها</h3><p>همین اعداد تفاوت «ربات تند» و «آدم آرام» را می‌سازند.</p></div>
+        </div>
+        <div class="form-grid">
+          ${field('فاصلهٔ پایهٔ اسکن (ثانیه)', 'browser.scanIntervalSeconds', { type: 'number', min: 30, max: 3600, hint: 'هر بار که دایرکت را نگاه می‌کند.' })}
+          ${field('پرش تصادفی اسکن (ثانیه)', 'browser.scanJitterSeconds', { type: 'number', min: 0, max: 600, hint: 'تا فاصله‌ها دقیقاً یک‌شکل نباشد.' })}
+          ${field('حداکثر گفتگو در هر پاس', 'browser.maxThreadsPerScan', { type: 'number', min: 1, max: 10 })}
+          ${field('فاصلهٔ دو ارسال (ثانیه)', 'browser.minGapBetweenSendsSeconds', { type: 'number', min: 15, max: 3600, hint: 'بین هر دو پیام، حتی برای دو نفر مختلف.' })}
+          ${field('مکث هر گفتگو (دقیقه)', 'browser.conversationCooldownMinutes', { type: 'number', min: 0, max: 1440, hint: 'به یک نفر پشت سر هم جواب نمی‌دهد.' })}
+          ${field('سقف ارسال روزانه', 'browser.dailySendCap', { type: 'number', min: 0, max: 500, hint: '۰ = بدون سقف (توصیه نمی‌شود).' })}
+          ${field('حداقل مکث قبل از نوشتن (میلی‌ثانیه)', 'browser.thinkMinMs', { type: 'number', min: 500, max: 120000 })}
+          ${field('حداکثر مکث قبل از نوشتن (میلی‌ثانیه)', 'browser.thinkMaxMs', { type: 'number', min: 500, max: 300000 })}
+          ${field('سرعت تایپ — حداقل (ms هر حرف)', 'browser.typingMinMsPerChar', { type: 'number', min: 15, max: 400 })}
+          ${field('سرعت تایپ — حداکثر (ms هر حرف)', 'browser.typingMaxMsPerChar', { type: 'number', min: 25, max: 800 })}
+        </div>
+        <div style="margin-top:16px">
+          <span class="field-label">سرعت پاسخ‌دهی</span>
+          <div class="segmented" id="browser-profile-seg">
+            <button class="seg ${browser.responseProfile === 'calm' ? 'active' : ''}" data-profile="calm">🐢 آرام</button>
+            <button class="seg ${browser.responseProfile === 'balanced' ? 'active' : ''}" data-profile="balanced">⚖️ متعادل</button>
+            <button class="seg ${browser.responseProfile === 'fast' ? 'active' : ''}" data-profile="fast">⚡ سریع</button>
+          </div>
+          <input type="hidden" data-path="browser.responseProfile" id="browser-profile-value" value="${esc(browser.responseProfile || 'calm')}" />
+          <p class="hint" style="margin-top:8px">با انتخاب پروفایل و ذخیره، اعداد پایین به مقدارهای پیشنهادی همان پروفایل برمی‌گردند (بعدش دستی هم می‌توانی عوض کنی). «سریع» یعنی Seen شدن و جواب در حدود نیم دقیقه؛ «آرام» برای شروع گزینهٔ بهتری است.</p>
+        </div>
+        <div style="margin-top:14px">
+          ${toggleRow('پاسخگویی ۲۴ ساعته', 'browser.alwaysOn', 'روشن باشد شبانه‌روز جواب می‌دهد؛ خاموش کن تا فقط داخل بازهٔ زیر جواب بدهد.')}
+        </div>
+        <div class="form-grid" style="margin-top:12px">
+          ${field('از ساعت', 'browser.workingHoursStart', { ltr: true, placeholder: '09:00', hint: 'به وقت تهران؛ فقط وقتی «۲۴ ساعته» خاموش است.' })}
+          ${field('تا ساعت', 'browser.workingHoursEnd', { ltr: true, placeholder: '23:30' })}
+        </div>
+        <p class="hint" style="margin-top:10px">هر بار که یک گفتگو باز می‌شود، پیام برای طرف مقابل <b>Seen</b> می‌شود؛ پس «فاصلهٔ اسکن» همان چیزی است که سرعت Seen شدن را تعیین می‌کند.</p>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <div><h3>پیشرفته</h3><p>فقط وقتی لازم است دست بزن.</p></div>
+        </div>
+        <details>
+          <summary class="hint" style="cursor:pointer">مسیر کروم و انتخابگرهای DOM</summary>
+          <div class="form-grid" style="margin-top:12px">
+            ${field('مسیر chrome.exe (اختیاری)', 'browser.chromeBinaryPath', { ltr: true, placeholder: 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' })}
+            ${field('آدرس صندوق دایرکت', 'browser.inboxUrl', { ltr: true })}
+            ${field('عرض پنجره', 'browser.windowWidth', { type: 'number', min: 900, max: 2560 })}
+            ${field('ارتفاع پنجره', 'browser.windowHeight', { type: 'number', min: 600, max: 1600 })}
+            ${field('مکث بعد از خطا (ثانیه)', 'browser.backoffSeconds', { type: 'number', min: 30, max: 7200 })}
+            <div class="span-full">${field('انتخابگر لیست گفتگوها', 'browser.threadLinkSelector', { ltr: true })}</div>
+            <div class="span-full">${field('انتخابگر کادر نوشتن', 'browser.composerSelector', { ltr: true })}</div>
+            <div class="span-full">${field('انتخابگر متن پیام‌ها', 'browser.messageTextSelector', { ltr: true })}</div>
+            <div class="span-full">${field('انتخابگر کامنت‌های پست', 'browser.commentSelector', { ltr: true, hint: 'برای کامنت‌به‌دایرکت؛ پیش‌فرض: article ul li' })}</div>
+          </div>
+          <p class="hint" style="margin-top:10px">اگر اینستاگرام ساختار صفحه را عوض کرد و اسکن چیزی پیدا نکرد، فقط همین انتخابگرها را با نسخهٔ درست عوض کن؛ نیازی به بیلد دوباره نیست.</p>
+        </details>
+      </section>
+    </div>`;
+
+  $$('#browser-mode-seg .seg').forEach((button) => {
+    button.addEventListener('click', () => {
+      $('#browser-mode-value').value = button.dataset.mode;
+      $$('#browser-mode-seg .seg').forEach((b) => b.classList.toggle('active', b === button));
+      toast('یادت نرود «ذخیرهٔ تنظیمات» را بزنی', 'info');
+    });
+  });
+
+  $$('#browser-profile-seg .seg').forEach((button) => {
+    button.addEventListener('click', () => {
+      $('#browser-profile-value').value = button.dataset.profile;
+      $$('#browser-profile-seg .seg').forEach((b) => b.classList.toggle('active', b === button));
+      toast('برای اعمال، «ذخیرهٔ تنظیمات» را بزن', 'info');
+    });
+  });
+
+  const refreshStatus = async () => {
+    try {
+      const fresh = await api('/api/browser/status');
+      applyStatus(fresh);
+      return fresh;
+    } catch {
+      return null;
+    }
+  };
+
+  const withBusy = (button, busyLabel, task) => {
+    if (!button) return;
+    const id = button.id;
+    const original = button.textContent;
+    button.disabled = true;
+    button.textContent = busyLabel;
+    Promise.resolve()
+      .then(task)
+      .catch((error) => toast(error.message, 'error'))
+      .finally(async () => {
+        const live = document.getElementById(id);
+        if (live) {
+          live.disabled = false;
+          live.textContent = original;
+        }
+        await refreshStatus();
+      });
+  };
+
+  // Per-account buttons: same actions, but only that account's window is touched.
+  $$('#view [data-act]').forEach((button) => {
+    button.addEventListener('click', (event) => withBusy(event.currentTarget, 'در حال انجام…', async () => {
+      const pageId = event.currentTarget.dataset.page;
+      const act = event.currentTarget.dataset.act;
+      if (act === 'login') await saveFromView({ silent: true });
+      const result = await api(`/api/browser/${act}`, { method: 'POST', body: { pageId } });
+      if (result.config) state.config = result.config;
+      toast(result.message || 'انجام شد', result.ok === false ? 'error' : 'success');
+      if (act === 'login' || act === 'start') await refreshStatus();
+    }));
+  });
+
+  const addAccount = $('#add-account');
+  if (addAccount) {
+    addAccount.addEventListener('click', async () => {
+      const username = ($('#new-account-user')?.value || '').trim().replace(/^@/, '');
+      const password = ($('#new-account-pass')?.value || '').trim();
+      if (!username) {
+        toast('یوزرنیم اینستاگرام را وارد کن', 'error');
+        $('#new-account-user')?.focus();
+        return;
+      }
+      addAccount.disabled = true;
+      try {
+        const result = await api('/api/browser/accounts', {
+          method: 'POST',
+          body: { username, password },
+        });
+        if (result.config) state.config = result.config;
+        toast(`حساب @${username} اضافه شد؛ حالا «روشن کردن» همان کارت را بزن`, 'success');
+        await route();
+      } catch (error) {
+        toast(error.message, 'error');
+        addAccount.disabled = false;
+      }
+    });
+  }
+
+  $('#browser-start').addEventListener('click', (event) => withBusy(event.currentTarget, 'در حال باز کردن کروم…', async () => {
+    const result = await api('/api/browser/start', { method: 'POST' });
+    toast(result.message || 'مرورگر باز شد', result.state === 'ready' ? 'success' : 'info');
+  }));
+
+  $('#browser-stop').addEventListener('click', (event) => withBusy(event.currentTarget, 'در حال بستن…', async () => {
+    await api('/api/browser/stop', { method: 'POST' });
+    toast('مرورگر بسته شد', 'success');
+  }));
+
+  $('#browser-scan').addEventListener('click', (event) => withBusy(event.currentTarget, 'در حال اسکن…', async () => {
+    const result = await api('/api/browser/scan', { method: 'POST' });
+    toast(result.message || 'اسکن انجام شد', result.ok ? 'success' : 'error');
+  }));
+
+  $('#browser-test').addEventListener('click', (event) => withBusy(event.currentTarget, 'در حال تست…', async () => {
+    const result = await api('/api/browser/test', { method: 'POST' });
+    toast(result.message || 'تست انجام شد', result.ok ? 'success' : 'error');
+  }));
+
+  const forgetButton = $('#browser-forget');
+  if (forgetButton) {
+    forgetButton.addEventListener('click', async (event) => {
+      if (!confirm('پسورد ذخیره‌شدهٔ همهٔ حساب‌ها پاک شود؟ (یوزرنیم‌ها می‌مانند)')) return;
+      const button = event.currentTarget;
+      button.disabled = true;
+      try {
+        const result = await api('/api/browser/forget-credentials', { method: 'POST' });
+        if (result.config) state.config = result.config;
+        toast('پسوردها پاک شدند؛ هر حساب دفعهٔ بعد دستی وارد می‌شود', 'success');
+        await route();
+      } catch (error) {
+        toast(error.message, 'error');
+        button.disabled = false;
+      }
+    });
+  }
+
+  startBrowserPolling();
+}
+
 /* ---------------------------------- boot ---------------------------------- */
 
 async function init() {
@@ -1618,10 +1955,16 @@ async function init() {
 
   document.addEventListener('click', (event) => {
     const copy = event.target.closest('[data-copy]');
-    if (!copy) return;
-    navigator.clipboard.writeText(copy.dataset.copy)
-      .then(() => toast('در کلیپ‌بورد کپی شد', 'success'))
-      .catch(() => toast('کپی ممکن نشد', 'error'));
+    if (copy) {
+      navigator.clipboard.writeText(copy.dataset.copy)
+        .then(() => toast('در کلیپ‌بورد کپی شد', 'success'))
+        .catch(() => toast('کپی ممکن نشد', 'error'));
+      return;
+    }
+
+    // The verification-code box is re-rendered by the status poller, so it is delegated.
+    const sendCode = event.target.closest('.send-code');
+    if (sendCode) submitVerificationCode(sendCode);
   });
 
   window.addEventListener('hashchange', route);
@@ -1633,36 +1976,38 @@ async function init() {
     toast(`اتصال به سرور برقرار نشد: ${error.message}`, 'error');
   }
 
-  handleOAuthReturn();
   await route();
 }
 
-/* -------------------------- returning from Instagram ---------------------- */
+/* --------------------------- verification code --------------------------- */
 
-const OAUTH_ERRORS = {
-  missing_app: 'اول Instagram App ID و App Secret را در «تنظیمات اپ متا»ٔ صفحهٔ «صفحات اینستاگرام» وارد کن.',
-  state: 'این درخواست منقضی یا نامعتبر بود؛ یک بار دیگر روی «ورود با اینستاگرام» بزن.',
-  missing_code: 'اینستاگرام کد مجوز را برنگرداند؛ دوباره تلاش کن.',
-  access_denied: 'دسترسی را لغو کردی.',
-};
-
-function handleOAuthReturn() {
-  const params = new URLSearchParams(location.search);
-  if (!params.has('oauth')) return;
-
-  const status = params.get('oauth');
-  if (status === 'success') {
-    const ig = params.get('ig');
-    toast(`اتصال برقرار شد${ig ? ` — @${ig}` : ''}`, 'success');
-    if (params.get('sub') === '0') {
-      toast('اکانت وصل شد ولی عضویت وبهوک خودکار انجام نشد؛ فیلد messages را در داشبورد متا Subscribe کن.', 'error');
-    }
-  } else {
-    const reason = params.get('reason') || 'unknown';
-    toast(`اتصال ناموفق: ${OAUTH_ERRORS[reason] || reason}`, 'error');
+/** Sends the one-time code Instagram e-mailed to the account's own window. */
+async function submitVerificationCode(button) {
+  const pageId = button.dataset.codePage || '';
+  const input = document.querySelector(`[data-code-input="${(pageId || '').replace(/"/g, '')}"]`);
+  const code = (input?.value || '').trim();
+  if (!code) {
+    toast('کد تأیید را وارد کن', 'error');
+    input?.focus();
+    return;
   }
 
-  history.replaceState(null, '', '/#connection');
+  const original = button.textContent;
+  button.disabled = true;
+  button.textContent = 'در حال بررسی…';
+  try {
+    const result = await api('/api/browser/code', { method: 'POST', body: { code, pageId } });
+    toast(result.message || (result.ok ? 'کد پذیرفته شد' : 'کد پذیرفته نشد'), result.ok ? 'success' : 'error');
+    if (result.ok) {
+      const fresh = await api('/api/browser/status');
+      applyStatus(fresh);
+    }
+  } catch (error) {
+    toast(error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.textContent = original;
+  }
 }
 
 document.addEventListener('DOMContentLoaded', init);

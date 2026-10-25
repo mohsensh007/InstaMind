@@ -13,7 +13,7 @@ public sealed class ReplyEngine
     private readonly ConfigService _config;
     private readonly ConversationService _conversations;
     private readonly AiClient _ai;
-    private readonly InstagramGateway _gateway;
+    private readonly MessageRouter _router;
     private readonly ILogger<ReplyEngine> _log;
 
     private readonly HashSet<string> _seenMessageIds = new();
@@ -23,13 +23,13 @@ public sealed class ReplyEngine
         ConfigService config,
         ConversationService conversations,
         AiClient ai,
-        InstagramGateway gateway,
+        MessageRouter router,
         ILogger<ReplyEngine> log)
     {
         _config = config;
         _conversations = conversations;
         _ai = ai;
-        _gateway = gateway;
+        _router = router;
         _log = log;
     }
 
@@ -241,7 +241,7 @@ public sealed class ReplyEngine
 
         if (deliver)
         {
-            var send = await _gateway.SendTextAsync(page, incoming.SenderId, reply, ct);
+            var send = await _router.SendTextAsync(page, incoming.SenderId, reply, ct);
             result.Sent = send.Ok;
             if (!send.Ok)
             {
@@ -280,7 +280,7 @@ public sealed class ReplyEngine
     {
         var conversation = await _conversations.GetAsync(conversationId);
         var page = _config.FindPage(conversation?.PageId) ?? _config.Current.Pages.FirstOrDefault();
-        var send = await _gateway.SendTextAsync(page, conversationId, text, ct);
+        var send = await _router.SendTextAsync(page, conversationId, text, ct);
         await _conversations.AppendOutgoingAsync(
             conversationId, text, "human", send.Ok ? "sent" : "failed", send.Error);
         return send;

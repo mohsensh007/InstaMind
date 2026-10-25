@@ -4,6 +4,7 @@ using System.Text.Json;
 using InstaMind.Infrastructure;
 using InstaMind.Models;
 using InstaMind.Services;
+using InstaMind.Services.Browser;
 using Microsoft.AspNetCore.HttpOverrides;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -16,7 +17,15 @@ builder.Services.AddHttpClient();
 builder.Services.AddMemoryCache();
 builder.Services.AddSingleton<AiClient>();
 builder.Services.AddSingleton<InstagramGateway>();
-builder.Services.AddSingleton<InstagramOAuth>();
+
+// Browser (Selenium) mode: one real Chrome window per connected page, each with its own
+// profile, its own pacing counters and its own AI.
+builder.Services.AddSingleton<BrowserHub>();
+builder.Services.AddSingleton<BrowserTransport>();
+builder.Services.AddSingleton<BrowserInboxWorker>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<BrowserInboxWorker>());
+
+builder.Services.AddSingleton<MessageRouter>();
 builder.Services.AddSingleton<ReplyEngine>();
 builder.Services.Configure<ForwardedHeadersOptions>(options =>
 {
@@ -36,21 +45,21 @@ app.UseStaticFiles();
 // Config & diagnostics
 // ---------------------------------------------------------------------------
 
-app.MapGet("/api/config", (HttpRequest request, ConfigService config, InstagramOAuth oauth) =>
+app.MapGet("/api/config", (HttpRequest request, ConfigService config) =>
 {
     var cfg = config.GetMasked();
     var raw = config.Current;
     return Results.Ok(new
     {
         config = cfg,
-        webhookUrl = $"{request.Scheme}://{request.Host}/webhook/instagram",
-        oauthRedirectUri = oauth.ResolveRedirectUri(request),
-        oauthReady = !string.IsNullOrWhiteSpace(raw.Instagram.AppId) && !string.IsNullOrWhiteSpace(raw.Instagram.AppSecret),
         connected = raw.Pages.Count > 0,
         pageCount = raw.Pages.Count,
+        browserAccounts = raw.Pages.Count(p => !string.IsNullOrWhiteSpace(p.BrowserUsername)),
         aiCount = raw.AiProviders.Count,
-        tokenExpiresAt = raw.Pages.FirstOrDefault()?.TokenExpiresAt ?? raw.Instagram.TokenExpiresAt,
+        tokenExpiresAt = raw.Pages.FirstOrDefault()?.TokenExpiresAt,
         liveReady = raw.Pages.Any(p => !string.IsNullOrWhiteSpace(p.AccessToken) && !string.IsNullOrWhiteSpace(p.IgUserId)),
+        browserMode = raw.Instagram.Mode == MessageRouter.ModeBrowser,
+        browserWorker = raw.Browser.Enabled,
         aiReady = raw.AiProviders.Any(p => !string.IsNullOrWhiteSpace(p.ApiKey)) ||
                   !string.IsNullOrWhiteSpace(raw.Ai.ApiKey),
         serverTime = DateTimeOffset.UtcNow
@@ -129,13 +138,13 @@ app.MapPost("/api/ai/test", async (HttpRequest request, AiClient ai, ConfigServi
     });
 });
 
-app.MapPost("/api/instagram/test", async (HttpRequest request, InstagramGateway gateway, ConfigService config, CancellationToken ct) =>
+app.MapPost("/api/instagram/test", async (HttpRequest request, MessageRouter router, ConfigService config, CancellationToken ct) =>
 {
     var body = await ReadJsonAsync<TestPageRequest>(request);
     var page = config.FindPage(body?.PageId);
     if (!string.IsNullOrWhiteSpace(body?.PageId) && page is null)
         return Results.NotFound(new { error = "چنین صفحه‌ای پیدا نشد." });
-    var result = await gateway.TestPageAsync(page, ct);
+    var result = await router.TestPageAsync(page, ct);
 
     if (page is not null)
     {
@@ -159,6 +168,178 @@ app.MapPost("/api/instagram/test", async (HttpRequest request, InstagramGateway 
 });
 
 // ---------------------------------------------------------------------------
+// Browser mode (Selenium): one real Chrome window per connected page
+// ---------------------------------------------------------------------------
+
+app.MapGet("/api/browser/status", (BrowserHub hub, ConfigService config) =>
+{
+    var sessions = hub.Active().Select(rt => rt.Status()).ToList();
+    return Results.Ok(new
+    {
+        running = sessions.Any(s => s.Running),
+        mode = config.Current.Instagram.Mode,
+        worker = config.Current.Browser.Enabled,
+        sessions
+    });
+});
+
+app.MapPost("/api/browser/start", async (HttpRequest request, BrowserHub hub, CancellationToken ct) =>
+{
+    var body = await ReadJsonAsync<PageRequest>(request);
+    var targets = hub.Resolve(body?.PageId);
+    if (targets.Count == 0) return Results.Ok(new { ok = false, message = "حسابی پیدا نشد؛ اول یک حساب اضافه کن." });
+
+    var results = new List<BrowserStatus>();
+    foreach (var runtime in targets) results.Add(await runtime.StartAsync(ct));
+
+    return Results.Ok(new
+    {
+        ok = results.Any(r => r.Running),
+        state = results.FirstOrDefault()?.State ?? "stopped",
+        message = Join(results, r => r.Message),
+        sessions = results
+    });
+});
+
+app.MapPost("/api/browser/stop", async (HttpRequest request, BrowserHub hub, CancellationToken ct) =>
+{
+    var body = await ReadJsonAsync<PageRequest>(request);
+    var targets = hub.Resolve(body?.PageId);
+    if (targets.Count == 0) return Results.Ok(new { ok = true, message = "چیزی برای بستن باز نبود." });
+
+    var results = new List<BrowserStatus>();
+    foreach (var runtime in targets) results.Add(await runtime.StopAsync());
+    return Results.Ok(new { ok = true, message = "پنجره‌ها بسته شدند.", sessions = results });
+});
+
+app.MapPost("/api/browser/login", async (HttpRequest request, BrowserHub hub, CancellationToken ct) =>
+{
+    var body = await ReadJsonAsync<PageRequest>(request);
+    var targets = hub.Resolve(body?.PageId);
+    if (targets.Count == 0) return Results.Ok(new { ok = false, message = "حسابی پیدا نشد؛ اول یک حساب اضافه کن." });
+
+    var reports = new List<string>();
+    var anyOk = false;
+    foreach (var runtime in targets)
+    {
+        var (ok, message, _) = await runtime.LoginWithSavedCredentialsAsync(ct);
+        anyOk |= ok;
+        reports.Add($"{LabelOf(runtime)}: {message}");
+    }
+
+    return Results.Ok(new
+    {
+        ok = anyOk,
+        state = targets.FirstOrDefault()?.Status().State,
+        message = string.Join(" | ", reports),
+        sessions = targets.Select(rt => rt.Status()).ToList()
+    });
+});
+
+app.MapPost("/api/browser/forget-credentials", (ConfigService config) =>
+{
+    config.ClearBrowserCredentials();
+    return Results.Ok(new { ok = true, config = config.GetMasked() });
+});
+
+app.MapPost("/api/browser/code", async (HttpRequest request, BrowserHub hub, CancellationToken ct) =>
+{
+    var body = await ReadJsonAsync<CodeRequest>(request);
+    var code = (body?.Code ?? "").Trim();
+    if (code.Length == 0) return Results.Ok(new { ok = false, message = "کد تأیید را وارد کن." });
+
+    var targets = hub.Resolve(body?.PageId);
+    if (targets.Count == 0) return Results.Ok(new { ok = false, message = "حسابی پیدا نشد." });
+    if (targets.Count > 1)
+        return Results.Ok(new { ok = false, message = "چند پنجره باز است؛ کد را برای یک حساب مشخص وارد کن." });
+
+    var (ok, message) = await targets[0].SubmitCodeAsync(code, ct);
+    return Results.Ok(new { ok, message, session = targets[0].Status() });
+});
+
+app.MapPost("/api/browser/accounts", (AddAccountRequest body, ConfigService config) =>
+{
+    var username = (body?.Username ?? "").Trim().TrimStart('@');
+    if (username.Length == 0)
+        return Results.BadRequest(new { error = "یوزرنیم اینستاگرام را وارد کن." });
+
+    if (config.Current.Pages.Any(p =>
+            string.Equals(p.BrowserUsername, username, StringComparison.OrdinalIgnoreCase)))
+        return Results.BadRequest(new { error = "این حساب قبلاً اضافه شده است." });
+
+    var password = (body?.Password ?? "").Trim();
+    var page = config.UpsertPage(new ConnectedPage
+    {
+        Id = Guid.NewGuid().ToString("N"),
+        Username = username,
+        BrowserUsername = username,
+        BrowserPassword = password,
+        BrowserAutoLogin = password.Length > 0,
+        BrowserEnabled = true
+    });
+
+    return Results.Ok(new { ok = true, pageId = page.Id, config = config.GetMasked() });
+});
+
+app.MapPost("/api/browser/test", async (HttpRequest request, BrowserHub hub, CancellationToken ct) =>
+{
+    var body = await ReadJsonAsync<PageRequest>(request);
+    var targets = hub.Resolve(body?.PageId);
+    if (targets.Count == 0) return Results.Ok(new { ok = false, message = "حسابی پیدا نشد." });
+
+    var reports = new List<string>();
+    var anyOk = false;
+    foreach (var runtime in targets)
+    {
+        var (result, _) = await runtime.TestAsync(ct);
+        anyOk |= result.Ok;
+        reports.Add($"{LabelOf(runtime)}: {result.Detail}");
+    }
+
+    return Results.Ok(new
+    {
+        ok = anyOk,
+        message = string.Join(" | ", reports),
+        sessions = targets.Select(rt => rt.Status()).ToList()
+    });
+});
+
+app.MapPost("/api/browser/scan", async (HttpRequest request, BrowserInboxWorker worker, CancellationToken ct) =>
+{
+    try
+    {
+        var body = await ReadJsonAsync<PageRequest>(request);
+        return Results.Ok(await worker.ScanOnceAsync(manual: true, body?.PageId, ct));
+    }
+    catch (OperationCanceledException)
+    {
+        return Results.Ok(new { ok = false, message = "اسکن لغو شد." });
+    }
+    catch (Exception ex)
+    {
+        return Results.Ok(new { ok = false, message = "اسکن ناموفق بود: " + ex.Message });
+    }
+});
+
+app.MapGet("/api/browser/diagnostics", (HttpRequest request, BrowserHub hub) =>
+{
+    var pageId = request.Query["pageId"].ToString();
+    var targets = hub.Resolve(string.IsNullOrWhiteSpace(pageId) ? null : pageId);
+    return Results.Ok(targets.Select(rt => new
+    {
+        pageId = rt.PageId,
+        username = rt.PageUsername,
+        diagnostics = rt.Diagnose()
+    }).ToList());
+});
+
+static string LabelOf(BrowserRuntime runtime) =>
+    string.IsNullOrWhiteSpace(runtime.PageUsername) ? "حساب" : "@" + runtime.PageUsername;
+
+static string Join(List<BrowserStatus> sessions, Func<BrowserStatus, string> pick) =>
+    string.Join(" | ", sessions.Select(s => $"{(string.IsNullOrWhiteSpace(s.PageUsername) ? "حساب" : "@" + s.PageUsername)}: {pick(s)}"));
+
+// ---------------------------------------------------------------------------
 // Connected Instagram pages (multiple pages supported)
 // ---------------------------------------------------------------------------
 
@@ -178,14 +359,6 @@ app.MapDelete("/api/pages/{id}", (string id, ConfigService config) =>
     config.RemovePage(id)
         ? Results.Ok(new { ok = true, config = config.GetMasked() })
         : Results.NotFound(new { error = "صفحه پیدا نشد." }));
-
-app.MapPost("/api/pages/{id}/refresh", async (string id, InstagramOAuth oauth, ConfigService config, CancellationToken ct) =>
-{
-    var page = config.FindPage(id);
-    if (page is null) return Results.NotFound(new { error = "صفحه پیدا نشد." });
-    var (ok, message) = await oauth.RefreshAsync(ct, page.Id);
-    return Results.Ok(new { ok, message, config = config.GetMasked() });
-});
 
 // ---------------------------------------------------------------------------
 // AI providers (multiple providers supported; the first is the default)
@@ -287,80 +460,6 @@ app.MapPost("/api/pages/{id}/limit", async (string id, HttpRequest request, Conf
             },
             config = config.GetMasked()
         });
-});
-
-// ---------------------------------------------------------------------------
-// Official Instagram Business Login (OAuth). The password never reaches us.
-// ---------------------------------------------------------------------------
-
-app.MapGet("/oauth/instagram/start", (HttpRequest request, ConfigService config, InstagramOAuth oauth) =>
-{
-    var ig = config.Current.Instagram;
-    if (string.IsNullOrWhiteSpace(ig.AppId) || string.IsNullOrWhiteSpace(ig.AppSecret))
-    {
-        return Results.Redirect("/?oauth=error&reason=missing_app");
-    }
-
-    var redirectUri = oauth.ResolveRedirectUri(request);
-    var authorizeUrl = oauth.BuildAuthorizeUrl(redirectUri, out _);
-    return Results.Redirect(authorizeUrl);
-});
-
-app.MapGet("/oauth/instagram/callback", async (
-    HttpRequest request,
-    ConfigService config,
-    InstagramOAuth oauth,
-    ILogger<Program> log,
-    CancellationToken ct) =>
-{
-    var query = request.Query;
-
-    if (query.ContainsKey("error"))
-    {
-        var reason = query["error_description"].ToString();
-        if (string.IsNullOrWhiteSpace(reason)) reason = query["error"].ToString();
-        log.LogWarning("Instagram OAuth denied: {Reason}", reason);
-        return Results.Redirect($"/?oauth=error&reason={Uri.EscapeDataString(reason)}");
-    }
-
-    var state = query["state"].ToString();
-    var code = query["code"].ToString();
-
-    if (!oauth.ConsumeState(state))
-    {
-        log.LogWarning("Instagram OAuth state rejected");
-        return Results.Redirect("/?oauth=error&reason=state");
-    }
-
-    if (string.IsNullOrWhiteSpace(code))
-    {
-        return Results.Redirect("/?oauth=error&reason=missing_code");
-    }
-
-    var redirectUri = oauth.ResolveRedirectUri(request);
-    var result = await oauth.CompleteAsync(code, redirectUri, ct);
-    if (!result.Ok)
-    {
-        log.LogWarning("Instagram OAuth failed: {Error}", result.Error);
-        return Results.Redirect($"/?oauth=error&reason={Uri.EscapeDataString(result.Error ?? "unknown")}");
-    }
-
-    var subscription = result.Subscribed ? "1" : "0";
-    return Results.Redirect($"/?oauth=success&ig={Uri.EscapeDataString(result.Username ?? string.Empty)}&sub={subscription}");
-});
-
-app.MapPost("/api/instagram/refresh", async (HttpRequest request, InstagramOAuth oauth, ConfigService config, CancellationToken ct) =>
-{
-    var body = await ReadJsonAsync<TestPageRequest>(request);
-    var page = string.IsNullOrWhiteSpace(body?.PageId) ? null : config.FindPage(body.PageId);
-    var (ok, message) = await oauth.RefreshAsync(ct, page?.Id);
-    return Results.Ok(new { ok, message, config = config.GetMasked() });
-});
-
-app.MapPost("/api/instagram/disconnect", (ConfigService config) =>
-{
-    config.ClearInstagramConnection();
-    return Results.Ok(new { ok = true });
 });
 
 // ---------------------------------------------------------------------------
@@ -623,3 +722,6 @@ public sealed record TestPageRequest(string? PageId);
 public sealed record TestAiRequest(string? AiId);
 public sealed record AssignAiRequest(string? AiId);
 public sealed record PageLimitRequest(int? DailyReplyLimit, long? DailyTokenLimit, bool? ResetUsage);
+public sealed record PageRequest(string? PageId);
+public sealed record CodeRequest(string? Code, string? PageId);
+public sealed record AddAccountRequest(string? Username, string? Password);

@@ -15,7 +15,7 @@ public sealed record ConnectionTest(bool Ok, string Detail, string? Username = n
 /// (POST /{version}/{ig-user-id}/messages) when mode = live.
 /// In sandbox mode nothing leaves the machine.
 /// </summary>
-public sealed class InstagramGateway
+public sealed class InstagramGateway : IMessageTransport
 {
     private readonly IHttpClientFactory _factory;
     private readonly ConfigService _config;

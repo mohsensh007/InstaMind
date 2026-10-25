@@ -10,6 +10,7 @@ namespace InstaMind.Services;
 public sealed class ConfigService
 {
     private readonly string _path;
+    private readonly string _contentRoot;
     private readonly SecretBox _box;
     private readonly object _sync = new();
     private AppConfig _config;
@@ -17,6 +18,7 @@ public sealed class ConfigService
     public ConfigService(IWebHostEnvironment env, SecretBox box)
     {
         _path = Path.Combine(env.ContentRootPath, "data", "config.json");
+        _contentRoot = env.ContentRootPath;
         _box = box;
         _config = Load();
     }
@@ -32,7 +34,12 @@ public sealed class ConfigService
         copy.Instagram.AccessToken = Mask(copy.Instagram.AccessToken);
         copy.Instagram.AppSecret = Mask(copy.Instagram.AppSecret);
         copy.Ai.ApiKey = Mask(copy.Ai.ApiKey);
-        foreach (var page in copy.Pages) page.AccessToken = Mask(page.AccessToken);
+        copy.Browser.InstagramPassword = Mask(copy.Browser.InstagramPassword);
+        foreach (var page in copy.Pages)
+        {
+            page.AccessToken = Mask(page.AccessToken);
+            page.BrowserPassword = Mask(page.BrowserPassword);
+        }
         foreach (var provider in copy.AiProviders) provider.ApiKey = Mask(provider.ApiKey);
         return copy;
     }
@@ -45,6 +52,20 @@ public sealed class ConfigService
             incoming.Instagram.AccessToken = MergeSecret(incoming.Instagram.AccessToken, _config.Instagram.AccessToken);
             incoming.Instagram.AppSecret = MergeSecret(incoming.Instagram.AppSecret, _config.Instagram.AppSecret);
             incoming.Ai.ApiKey = MergeSecret(incoming.Ai.ApiKey, _config.Ai.ApiKey);
+
+            incoming.Browser ??= new BrowserConfig();
+            // The single-account login is legacy: it lives on each page now.
+            incoming.Browser.InstagramUsername = "";
+            incoming.Browser.InstagramPassword = "";
+            incoming.Browser.AutoLogin = false;
+
+            // Picking a different speed profile rewrites the pacing numbers; hand-tuned
+            // numbers under the same profile are kept as they are.
+            if (!string.Equals(incoming.Browser.ResponseProfile, _config.Browser.ResponseProfile,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                incoming.Browser.ApplyProfile();
+            }
 
             // Pages and providers are managed through their own endpoints; a client-submitted
             // list never carries usable secrets, so restore the stored one (or merge by id).
@@ -68,6 +89,7 @@ public sealed class ConfigService
         {
             var existing = _config.Pages.FirstOrDefault(p => p.Id == page.Id);
             page.AccessToken = MergeSecret(page.AccessToken, existing?.AccessToken ?? "");
+            page.BrowserPassword = MergeSecret(page.BrowserPassword, existing?.BrowserPassword ?? "");
             if (existing is not null)
             {
                 page.TokenExpiresAt ??= existing.TokenExpiresAt;
@@ -347,10 +369,72 @@ public sealed class ConfigService
         }
     }
 
+    /// <summary>
+    /// Removes the saved handle/password of every browser account. A blank secret in
+    /// <see cref="Save"/> means "keep the stored one", so forgetting needs its own path.
+    /// </summary>
+    public void ClearBrowserCredentials()
+    {
+        lock (_sync)
+        {
+            var cfg = _config.Clone();
+            foreach (var page in cfg.Pages)
+            {
+                page.BrowserUsername = "";
+                page.BrowserPassword = "";
+                page.BrowserAutoLogin = false;
+            }
+            Persist(cfg);
+            _config = cfg;
+        }
+    }
+
     private static string MergeSecret(string submitted, string existing)
     {
         if (string.IsNullOrWhiteSpace(submitted) || submitted == SecretBox.Mask) return existing;
         return submitted.Trim();
+    }
+
+    /// <summary>
+    /// Moves the single-account browser login (and its Chrome profile) that older versions
+    /// stored on <c>browser.*</c> onto the first connected page, so nothing is lost and from
+    /// then on every account keeps its own window and its own credentials.
+    /// </summary>
+    private void MigrateLegacyCredentials(AppConfig cfg)
+    {
+        var legacy = cfg.Browser;
+        var hasLegacy = !string.IsNullOrWhiteSpace(legacy.InstagramUsername) ||
+                        !string.IsNullOrWhiteSpace(legacy.InstagramPassword);
+        if (!hasLegacy && string.IsNullOrWhiteSpace(legacy.ProfileDirectory)) return;
+
+        var target = cfg.Pages.FirstOrDefault(p => string.IsNullOrWhiteSpace(p.BrowserUsername))
+                     ?? cfg.Pages.FirstOrDefault();
+        if (target is not null)
+        {
+            if (hasLegacy && string.IsNullOrWhiteSpace(target.BrowserUsername))
+            {
+                target.BrowserUsername = (legacy.InstagramUsername ?? "").Trim().TrimStart('@');
+                target.BrowserPassword = legacy.InstagramPassword ?? "";
+                target.BrowserAutoLogin = legacy.AutoLogin;
+            }
+            if (string.IsNullOrWhiteSpace(target.BrowserProfileDirectory) &&
+                !string.IsNullOrWhiteSpace(legacy.ProfileDirectory))
+            {
+                target.BrowserProfileDirectory = legacy.ProfileDirectory;
+            }
+        }
+
+        // A profile folder from the single-window days keeps the login the owner already did.
+        if (target is not null && string.IsNullOrWhiteSpace(target.BrowserProfileDirectory))
+        {
+            var oldProfile = Path.Combine(_contentRoot, "data", "browser-profile");
+            if (Directory.Exists(oldProfile)) target.BrowserProfileDirectory = oldProfile;
+        }
+
+        legacy.InstagramUsername = "";
+        legacy.InstagramPassword = "";
+        legacy.AutoLogin = false;
+        legacy.ProfileDirectory = "";
     }
 
     private AppConfig Load()
@@ -360,6 +444,7 @@ public sealed class ConfigService
         cfg.Ai ??= new AiConfig();
         cfg.Persona ??= new PersonaConfig();
         cfg.Guardrails ??= new GuardrailConfig();
+        cfg.Browser ??= new BrowserConfig();
         cfg.Knowledge ??= new List<KnowledgeItem>();
         cfg.Pages ??= new List<ConnectedPage>();
         cfg.AiProviders ??= new List<AiProvider>();
@@ -367,9 +452,12 @@ public sealed class ConfigService
         cfg.Instagram.AccessToken = _box.Unprotect(cfg.Instagram.AccessToken);
         cfg.Instagram.AppSecret = _box.Unprotect(cfg.Instagram.AppSecret);
         cfg.Ai.ApiKey = _box.Unprotect(cfg.Ai.ApiKey);
+        cfg.Browser.InstagramPassword = _box.Unprotect(cfg.Browser.InstagramPassword);
         foreach (var page in cfg.Pages) page.AccessToken = _box.Unprotect(page.AccessToken);
+        foreach (var page in cfg.Pages) page.BrowserPassword = _box.Unprotect(page.BrowserPassword);
         foreach (var provider in cfg.AiProviders) provider.ApiKey = _box.Unprotect(provider.ApiKey);
 
+        MigrateLegacyCredentials(cfg);
         Normalize(cfg);
         MirrorLegacy(cfg);
         return cfg;
@@ -382,6 +470,7 @@ public sealed class ConfigService
         stored.Instagram.AppSecret = _box.Protect(stored.Instagram.AppSecret);
         stored.Ai.ApiKey = _box.Protect(stored.Ai.ApiKey);
         foreach (var page in stored.Pages) page.AccessToken = _box.Protect(page.AccessToken);
+        foreach (var page in stored.Pages) page.BrowserPassword = _box.Protect(page.BrowserPassword);
         foreach (var provider in stored.AiProviders) provider.ApiKey = _box.Protect(provider.ApiKey);
         AtomicJson.Write(_path, stored);
     }
@@ -452,7 +541,8 @@ public sealed class ConfigService
     {
         cfg.Pages ??= new List<ConnectedPage>();
         cfg.AiProviders ??= new List<AiProvider>();
-        cfg.Pages = cfg.Pages.Where(p => p is not null && !string.IsNullOrWhiteSpace(p.IgUserId)).ToList();
+        cfg.Pages = cfg.Pages.Where(p => p is not null &&
+            (!string.IsNullOrWhiteSpace(p.IgUserId) || !string.IsNullOrWhiteSpace(p.BrowserUsername))).ToList();
         cfg.AiProviders = cfg.AiProviders.Where(p => p is not null).ToList();
         foreach (var page in cfg.Pages)
         {
@@ -460,6 +550,11 @@ public sealed class ConfigService
             page.Username = (page.Username ?? "").Trim().TrimStart('@');
             page.AiId = (page.AiId ?? "").Trim();
             page.LastTestMessage = page.LastTestMessage ?? "";
+            page.BrowserUsername = (page.BrowserUsername ?? "").Trim().TrimStart('@');
+            page.BrowserPassword ??= "";
+            page.BrowserProfileDirectory = (page.BrowserProfileDirectory ?? "").Trim();
+            page.CommentBot ??= new CommentBotConfig();
+            NormalizeCommentBot(page.CommentBot);
             page.DailyReplyLimit = Math.Clamp(page.DailyReplyLimit, 0, 100000);
             page.DailyTokenLimit = Math.Clamp(page.DailyTokenLimit, 0, 100_000_000_000L);
             page.RepliesToday = Math.Max(0, page.RepliesToday);
@@ -482,7 +577,12 @@ public sealed class ConfigService
             provider.ReplyCount = Math.Max(0, provider.ReplyCount);
         }
 
-        cfg.Instagram.Mode = cfg.Instagram.Mode is "live" ? "live" : "sandbox";
+        cfg.Instagram.Mode = (cfg.Instagram.Mode ?? "").Trim().ToLowerInvariant() switch
+        {
+            "live" => "live",
+            "browser" => "browser",
+            _ => "sandbox"
+        };
         cfg.Instagram.AppId = (cfg.Instagram.AppId ?? "").Trim();
         cfg.Instagram.RedirectUri = (cfg.Instagram.RedirectUri ?? "").Trim();
         cfg.Instagram.GraphBaseUrl = Clean(cfg.Instagram.GraphBaseUrl, "https://graph.instagram.com");
@@ -496,6 +596,52 @@ public sealed class ConfigService
         cfg.Ai.MaxTokens = Math.Clamp(cfg.Ai.MaxTokens, 50, 4000);
         cfg.Ai.TimeoutSeconds = Math.Clamp(cfg.Ai.TimeoutSeconds, 5, 120);
 
+        var browser = cfg.Browser ??= new BrowserConfig();
+        browser.ChromeBinaryPath = (browser.ChromeBinaryPath ?? "").Trim();
+        browser.ProfileDirectory = (browser.ProfileDirectory ?? "").Trim();
+        browser.InboxUrl = string.IsNullOrWhiteSpace(browser.InboxUrl)
+            ? "https://www.instagram.com/direct/inbox/"
+            : browser.InboxUrl.Trim();
+        browser.ThreadLinkSelector = string.IsNullOrWhiteSpace(browser.ThreadLinkSelector)
+            ? "a[href*=\"/direct/t/\"]"
+            : browser.ThreadLinkSelector.Trim();
+        browser.ComposerSelector = string.IsNullOrWhiteSpace(browser.ComposerSelector)
+            ? "div[contenteditable=\"true\"][role=\"textbox\"]"
+            : browser.ComposerSelector.Trim();
+        browser.MessageTextSelector = string.IsNullOrWhiteSpace(browser.MessageTextSelector)
+            ? "div[dir=\"auto\"]"
+            : browser.MessageTextSelector.Trim();
+        browser.CommentSelector = string.IsNullOrWhiteSpace(browser.CommentSelector)
+            ? "article ul li"
+            : browser.CommentSelector.Trim();
+        browser.WindowWidth = Math.Clamp(browser.WindowWidth, 900, 2560);
+        browser.WindowHeight = Math.Clamp(browser.WindowHeight, 600, 1600);
+        browser.ScanIntervalSeconds = Math.Clamp(browser.ScanIntervalSeconds, 10, 3600);
+        browser.ScanJitterSeconds = Math.Clamp(browser.ScanJitterSeconds, 0, 600);
+        browser.MaxThreadsPerScan = Math.Clamp(browser.MaxThreadsPerScan, 1, 10);
+        browser.MinGapBetweenSendsSeconds = Math.Clamp(browser.MinGapBetweenSendsSeconds, 5, 3600);
+        browser.ConversationCooldownMinutes = Math.Clamp(browser.ConversationCooldownMinutes, 0, 1440);
+        browser.TypingMinMsPerChar = Math.Clamp(browser.TypingMinMsPerChar, 15, 400);
+        browser.TypingMaxMsPerChar = Math.Clamp(browser.TypingMaxMsPerChar, browser.TypingMinMsPerChar + 5, 800);
+        browser.ThinkMinMs = Math.Clamp(browser.ThinkMinMs, 300, 120000);
+        browser.ThinkMaxMs = Math.Clamp(browser.ThinkMaxMs, browser.ThinkMinMs, 300000);
+        browser.DailySendCap = Math.Clamp(browser.DailySendCap, 0, 500);
+        browser.BackoffSeconds = Math.Clamp(browser.BackoffSeconds, 30, 7200);
+        browser.WorkingHoursStart = NormalizeClock(browser.WorkingHoursStart, "09:00");
+        browser.WorkingHoursEnd = NormalizeClock(browser.WorkingHoursEnd, "23:30");
+        browser.SendsDate = browser.SendsDate ?? "";
+        browser.SendsToday = Math.Max(0, browser.SendsToday);
+
+        browser.InstagramUsername = (browser.InstagramUsername ?? "").Trim().TrimStart('@');
+        browser.InstagramPassword ??= "";
+        browser.ProfileDirectory = (browser.ProfileDirectory ?? "").Trim();
+        browser.ResponseProfile = (browser.ResponseProfile ?? "").Trim().ToLowerInvariant() switch
+        {
+            "fast" => "fast",
+            "balanced" => "balanced",
+            _ => "calm"
+        };
+
         cfg.Persona.MaxChars = Math.Clamp(cfg.Persona.MaxChars, 60, 900);
         cfg.Persona.AllowedTopics = CleanList(cfg.Persona.AllowedTopics);
         cfg.Persona.ForbiddenTopics = CleanList(cfg.Persona.ForbiddenTopics);
@@ -508,6 +654,21 @@ public sealed class ConfigService
 
     private static string Clean(string? value, string fallback) =>
         string.IsNullOrWhiteSpace(value) ? fallback : value.Trim();
+
+    private static void NormalizeCommentBot(CommentBotConfig bot)
+    {
+        bot.PostUrl = (bot.PostUrl ?? "").Trim();
+        bot.Keyword = (bot.Keyword ?? "").Trim();
+        bot.FollowPrompt = (bot.FollowPrompt ?? "").Trim();
+        bot.Message = bot.Message ?? "";
+        bot.MaxPerDay = Math.Clamp(bot.MaxPerDay, 0, 500);
+        bot.CooldownMinutes = Math.Clamp(bot.CooldownMinutes, 0, 1440);
+        bot.CheckIntervalMinutes = Math.Clamp(bot.CheckIntervalMinutes, 1, 1440);
+        bot.MaxPerPass = Math.Clamp(bot.MaxPerPass, 1, 20);
+    }
+
+    private static string NormalizeClock(string? value, string fallback) =>
+        TimeOnly.TryParse(value, out var parsed) ? parsed.ToString("HH:mm") : fallback;
 
     private static List<string> CleanList(List<string>? items) =>
         (items ?? new List<string>())
